@@ -1,0 +1,10 @@
+.env
+data/
+*.parquet
+*.duckdb
+__pycache__/
+.ipynb_checkpoints/
+.venv/
+.DS_Store
+.claude
+CLAUDE.md
