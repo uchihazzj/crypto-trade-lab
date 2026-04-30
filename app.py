@@ -46,7 +46,10 @@ from src.crypto_trend_lab.utils.helpers import (
     timeframe_to_timedelta,
 )
 from src.crypto_trend_lab.validation.quality import check_ohlcv_quality
-from src.crypto_trend_lab.visualization.charts import candlestick_chart
+from src.crypto_trend_lab.visualization.charts import (
+    add_datetime_vertical_marker,
+    candlestick_chart,
+)
 from src.crypto_trend_lab.visualization.display import (
     DEFAULT_MAX_CANDLES,
     DEFAULT_PREVIEW_ROWS,
@@ -1580,18 +1583,9 @@ with tab_models:
                         ))
 
                     # Vertical marker at latest observed timestamp
-                    y_min = min(
-                        chart_df["low"].min() if "low" in chart_df.columns else path_closes[0],
-                        min(path_closes),
-                    )
-                    y_max = max(
-                        chart_df["high"].max() if "high" in chart_df.columns else path_closes[0],
-                        max(path_closes),
-                    )
-                    fig_fp.add_vline(
-                        x=latest_ts, line_width=1, line_dash="dot",
-                        line_color="gray",
-                        annotation_text="Latest observed",
+                    add_datetime_vertical_marker(
+                        fig_fp, x=latest_ts, text="Latest observed",
+                        line_dash="dot", line_color="gray",
                     )
 
                     fig_fp.update_layout(

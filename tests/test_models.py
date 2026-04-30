@@ -2030,3 +2030,75 @@ def test_multi_resolution_no_live_network_calls():
     display = prepare_candlestick_display_data(df_view, max_bars=500)
     summary = get_display_summary(df_full, df_view, display)
     assert summary["full_rows"] == 1000
+
+
+# ---------------------------------------------------------------------------
+# add_datetime_vertical_marker
+# ---------------------------------------------------------------------------
+
+
+def test_datetime_vertical_marker_no_typeerror():
+    """add_vline with annotation on datetime axis raises TypeError in
+    modern pandas. Our helper uses add_shape + add_annotation instead."""
+    import plotly.graph_objects as go
+
+    from src.crypto_trend_lab.visualization.charts import (
+        add_datetime_vertical_marker,
+    )
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=pd.date_range("2024-01-01", periods=10, freq="1h", tz="utc"),
+        y=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        mode="lines",
+        name="Test",
+    ))
+    marker_x = pd.Timestamp("2024-01-01 05:00:00", tz="utc")
+
+    fig = add_datetime_vertical_marker(
+        fig, x=marker_x, text="Marker",
+        line_dash="dot", line_color="gray",
+    )
+
+    assert len(fig.layout.shapes) >= 1
+    assert len(fig.layout.annotations) >= 1
+
+
+def test_datetime_vertical_marker_without_text():
+    """When text is None, no annotation should be added."""
+    import plotly.graph_objects as go
+
+    from src.crypto_trend_lab.visualization.charts import (
+        add_datetime_vertical_marker,
+    )
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=pd.date_range("2024-01-01", periods=5, freq="1h", tz="utc"),
+        y=[1, 2, 3, 4, 5],
+    ))
+    marker_x = pd.Timestamp("2024-01-01 02:00:00", tz="utc")
+
+    fig = add_datetime_vertical_marker(fig, x=marker_x)
+
+    assert len(fig.layout.shapes) >= 1
+    assert fig.layout.annotations is None or len(fig.layout.annotations) == 0
+
+
+def test_datetime_vertical_marker_no_live_network_calls():
+    import plotly.graph_objects as go
+
+    from src.crypto_trend_lab.visualization.charts import (
+        add_datetime_vertical_marker,
+    )
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=pd.date_range("2024-01-01", periods=3, freq="1h", tz="utc"),
+        y=[1, 2, 3],
+    ))
+    fig = add_datetime_vertical_marker(
+        fig, x=pd.Timestamp("2024-01-01 01:00:00", tz="utc"),
+        text="Test",
+    )
+    assert fig is not None
