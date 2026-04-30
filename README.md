@@ -199,11 +199,218 @@ Prediction results are saved to:
 data/predictions/exchange=<exchange>/symbol=<symbol>/timeframe=<timeframe>/model=<model_name>/target=<target_column>/predictions.parquet
 ```
 
+### Full Evaluation Report
+
+The Model Evaluation tab includes a **Full Evaluation Report** section that runs
+all supported task types, horizons, and models in one batch:
+
+- **Task types**: regression (target_return_h), classification (target_direction_h)
+- **Horizons**: 1, 4, 24
+- **Models**: all regression baselines + Ridge + LightGBM; all classification baselines + Logistic Regression + LightGBM
+
+The report produces:
+
+- **Metrics table**: all task × horizon × model combinations with regression and
+  classification metrics.
+- **Best model summary**: best MAE/RMSE for regression, best accuracy/F1 for
+  classification, per horizon.
+- **Skipped combinations**: every failed combination is logged with a clear reason
+  (missing target, insufficient data, LightGBM not installed).
+- **CSV downloads**: metrics and skipped combinations can be downloaded.
+
+Combinations that cannot run (e.g. missing target column, too few valid rows) are
+skipped gracefully with a reason recorded — they never crash the whole report.
+
+All results are experimental model evaluation outputs. They do not constitute
+financial advice. Macro indicators, sequence models (Darts, NeuralForecast),
+and deep learning are not implemented.
+
 ### Non-Trading Warning
 
 All model outputs are **experimental research signals**. They are not investment
 advice. Crypto markets are noisy, non-stationary, and high-risk. Past performance
 in backtests does not guarantee future results.
+
+## Milestone 3.5 Scope
+
+- [x] Large recent-bars fetch with pagination (up to 50000 bars).
+- [x] Data coverage summary showing requested vs actual rows.
+- [x] Improved Full Evaluation Report with visualizations and cautious analysis.
+- [x] Forward Forecast: single-point and forecast path.
+- [x] Forecast path: sparse direct-horizon chart with actual OHLCV + predicted close.
+- [x] Forecast Parquet storage with deterministic paths.
+- [x] Forecast Path Chart timestamp generation fix (Timedelta arithmetic, expanded timeframe mapping).
+- [x] OHLCV display aggregation (preserves OHLCV semantics, no random sampling, no averaging).
+- [x] Chart time range controls and max candles selector.
+- [x] Full dataset protection: df_chart/df_preview are rendering-only, never used for modeling.
+- [x] Unit tests for pagination, forecast path, timestamp generation, display aggregation, and data integrity.
+
+### Large Fetch Behavior
+
+When requesting more than 1000 bars in Recent Bars mode, the app automatically
+uses the paginated `fetch_ohlcv_range()` function instead of a single
+`fetch_ohlcv()` call (which exchanges typically cap at ~1000 bars).
+
+- A start timestamp is computed from `now - limit × timeframe_duration`.
+- The paginated range fetch retrieves all available bars in the window.
+- If more than *limit* bars are returned, only the most recent *limit* are kept.
+- If fewer than requested are returned, a warning is shown with the shortfall.
+- After fetching, the Data Coverage section shows: start, end, duration,
+  requested vs actual rows, and data sizing warnings.
+
+### Data Quality — Active Data Source
+
+The Data Quality tab now clearly shows which data is being inspected:
+
+- **Freshly fetched**: number of bars requested vs received.
+- **Loaded from local Parquet**: file path context.
+- Row count, symbol, and timeframe are displayed alongside quality metrics.
+
+### Full Evaluation Report Improvements
+
+The Full Evaluation Report now includes:
+
+- **Metric bar charts**: grouped bars for each metric by model and horizon,
+  separately for regression and classification.
+- **Best Model Summary table**: for each task type × horizon, identifies the
+  best model by MAE, RMSE, directional accuracy, balanced accuracy, F1, and
+  AUC (where available). "Best" refers only to the listed metric under this
+  historical test split.
+- **Detailed Model View**: select a task type, horizon, and model to inspect
+  y_true vs y_pred line chart, actual vs predicted scatter plot, residual plot
+  (regression), confusion matrix (classification), and probability chart.
+- **Cautious Textual Analysis**: rule-based analysis covering dataset size,
+  model-vs-baseline comparison, horizon consistency, and limitations. Uses
+  cautious language (no buy/sell/trading advice).
+- **Downloads**: metrics CSV, skipped CSV, best model summary CSV, and
+  analysis markdown.
+
+### Forward Forecast vs Historical Evaluation
+
+**Historical Evaluation** (Full Evaluation Report):
+- Train on a chronological split of the data.
+- Evaluate on a held-out test window.
+- Compare models with metrics.
+- Answers: "Did this model work on past unseen data?"
+
+**Forward Forecast**:
+- Train on ALL available labeled historical rows.
+- Predict from the latest feature row (whose target is unknown — it's the
+  future).
+- Answers: "What does this model say about the immediate future?"
+- The output is an **experimental forecast**, NOT a trading signal.
+
+### Forward Forecast — Single Point
+
+The single-point forecast:
+1. Select task type (regression/classification), horizon (1/4/24), and model.
+2. The model trains on all rows with valid features and known targets.
+3. Predicts from the latest row with valid features (target may be NaN).
+4. Regression output: predicted log return, latest close, implied future close,
+   historical MAE/RMSE for context.
+5. Classification output: predicted direction, probability (if available),
+   historical balanced accuracy for context.
+6. Results can be saved to `data/forecasts/...`.
+
+### Forward Forecast — Forecast Path
+
+The forecast path produces a visual chart of actual OHLCV candles (left)
+and predicted future close-price points (right):
+
+- **Method**: Sparse direct-horizon forecast using supported regression
+  targets: `target_return_1`, `target_return_4`, `target_return_24`.
+- **Path length**: user-selectable (6, 12, 24, 48, 72, 168 bars).
+- Only horizons ≤ path_length are included in the forecast.
+- Predicted future close at horizon *h*: `latest_close × exp(predicted_log_return_h)`.
+- The future line starts from the latest observed close.
+- A vertical marker separates observed data from the forecast.
+- Intermediate points between predicted horizons are connected by
+  interpolation for visualization — clearly labeled as such.
+- Classification does not produce a close-price forecast path.
+
+**Limitations**:
+- Only 3 sparse horizons are directly predicted (1, 4, 24).
+- Technical features are fixed at their latest observed values for all
+  forecast steps — no feature dynamics are modeled.
+- The forecast path is model-estimated and may be unstable with small datasets.
+- This is NOT a trading signal or investment advice.
+
+### Forecast Storage
+
+Forecast results are saved to:
+
+```
+data/forecasts/exchange=<exchange>/symbol=<symbol>/timeframe=<timeframe>/model=<model_name>/target=<target_column>/forecast.parquet
+```
+
+### Forecast Path Chart — Timestamp Generation
+
+Future forecast timestamps are generated using `pd.Timedelta` arithmetic,
+never integer addition. The reusable `timeframe_to_timedelta(timeframe)`
+helper converts any supported timeframe to a `pd.Timedelta`:
+
+```python
+future_ts = latest_ts + delta * step  # delta = pd.Timedelta, step = int
+```
+
+Supported timeframes: `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`,
+`6h`, `8h`, `12h`, `1d`, `1w`.
+
+Direct `Timestamp + int` is never used — this avoids the pandas
+`TypeError: Addition/subtraction of integers and integer-arrays with
+Timestamp is no longer supported` in modern pandas versions.
+
+### OHLCV Display Aggregation
+
+Large datasets (e.g. 50000 bars) are slow to render in Plotly candlestick charts
+and huge table previews. The display aggregation module solves this without
+affecting the full dataset used for modeling.
+
+**Key invariant**: The full dataset is always preserved for Parquet storage,
+data quality checks, feature generation, model evaluation, and forecast fitting.
+
+**Definitions**:
+- `df_full` — the complete OHLCV DataFrame (used for storage, features, modeling).
+- `df_view` — a time-range-filtered subset of `df_full` (UI only).
+- `df_chart` — display-level aggregated OHLCV candles for Plotly rendering.
+- `df_preview` — display-level table preview (tail rows only).
+
+**Aggregation method**:
+- Groups consecutive rows into approximately *target_bars* groups.
+- Each output row preserves OHLCV semantics:
+  - `open` = first open in the group
+  - `high` = max high in the group
+  - `low` = min low in the group
+  - `close` = last close in the group
+  - `volume` = sum of volume in the group
+- Prices are **never averaged**.
+- Random sampling and every-N-row sampling are deliberately not used because
+  they destroy OHLCV relationships (a random open paired with a random close
+  is not meaningful for candlestick analysis).
+
+**Chart controls** (available in Fetch & Chart and Local Storage tabs):
+- Time range: Full range, Last 7/30/90 days, or custom.
+- Max candles: 500, 1000, 2000, 5000.
+- Display summary shows: full rows, view rows, displayed candles, display mode
+  (raw or aggregated), and approximate bars per displayed candle.
+
+**Table preview**: Shows the latest 500 raw rows by default. The full dataset
+row count is always shown. Aggregated overview is available as an alternative.
+
+**Modeling protection**:
+- `build_features()` always receives `df_full`.
+- `check_ohlcv_quality()` always receives `df_full`.
+- Model evaluation and forward forecast always use full features.
+- `df_chart` and `df_preview` are rendering-only artifacts.
+
+### Performance Recommendations for Large Datasets
+
+- Fetch up to 50000 bars for thorough model evaluation (1h timeframe = ~5.7 years).
+- Use chart time range filtering to inspect specific periods quickly.
+- Limit displayed candles to 1000 for responsive chart interaction.
+- Plotly performance degrades above ~5000 rendered candles.
+- Feature generation and model evaluation throughput depend on row count, not
+  chart aggregation — display settings do not affect modeling speed.
 
 ## Data Sources (Read-Only)
 

@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 import yaml
 
-from src.crypto_trend_lab.data_ingestion.fetcher import fetch_ohlcv
+from src.crypto_trend_lab.data_ingestion.fetcher import fetch_ohlcv, fetch_ohlcv_range
 from src.crypto_trend_lab.features.pipeline import (
     build_features,
     get_model_input_columns,
@@ -20,6 +20,12 @@ from src.crypto_trend_lab.features.pipeline import (
     get_target_columns,
     get_technical_feature_columns,
 )
+from src.crypto_trend_lab.evaluation.full_report import (
+    build_best_model_summary,
+    generate_report_analysis,
+    run_full_evaluation_report,
+)
+from src.crypto_trend_lab.evaluation.forecast import forecast_path, forward_forecast
 from src.crypto_trend_lab.evaluation.report import compare_baselines_and_models
 from src.crypto_trend_lab.models.dataset import (
     get_default_feature_columns,
@@ -30,11 +36,25 @@ from src.crypto_trend_lab.storage.parquet import (
     load_features_parquet,
     load_ohlcv_parquet,
     save_features_parquet,
+    save_forecast_parquet,
     save_ohlcv_parquet,
     save_predictions_parquet,
 )
+from src.crypto_trend_lab.utils.helpers import (
+    dataset_sizing_warning,
+    estimate_coverage,
+    timeframe_to_timedelta,
+)
 from src.crypto_trend_lab.validation.quality import check_ohlcv_quality
 from src.crypto_trend_lab.visualization.charts import candlestick_chart
+from src.crypto_trend_lab.visualization.display import (
+    DEFAULT_MAX_CANDLES,
+    DEFAULT_PREVIEW_ROWS,
+    aggregate_ohlcv_by_count,
+    filter_by_time_range,
+    get_display_summary,
+    prepare_candlestick_display_data,
+)
 
 st.set_page_config(
     page_title="Crypto Trend Lab",
@@ -83,7 +103,19 @@ timeframe = st.sidebar.selectbox(
     index=TIMEFRAMES.index(config["defaults"]["timeframe"]),
 )
 
-limit = st.sidebar.slider("Bars to fetch", min_value=50, max_value=1000, value=500, step=50)
+limit = st.sidebar.number_input(
+    "Bars to fetch",
+    min_value=100,
+    max_value=50000,
+    value=1000,
+    step=100,
+    help=(
+        "Number of recent OHLCV bars to fetch. "
+        "100–1000 is sufficient for UI testing. "
+        "For model evaluation, use 5000+ (1h), 2000+ (4h), or 500+ (1d). "
+        "Large fetches may require exchange pagination and take time."
+    ),
+)
 
 # ---------------------------------------------------------------------------
 # Tabs
@@ -100,31 +132,138 @@ tab_fetch, tab_local, tab_quality, tab_features, tab_models = st.tabs(
 with tab_fetch:
     st.subheader("Fetch OHLCV Data")
 
+    fetch_mode = st.radio(
+        "Fetch Mode",
+        ["Recent Bars", "Date Range"],
+        horizontal=True,
+        key="fetch_mode",
+    )
+
     col1, col2 = st.columns([1, 3])
 
     with col1:
-        if st.button("Fetch OHLCV", type="primary", width="stretch"):
-            with st.spinner(f"Fetching {symbol} {timeframe} from {exchange}..."):
-                try:
-                    df = fetch_ohlcv(exchange, symbol, timeframe, limit=limit)
-                    st.session_state["fetch_df"] = df
-                    st.success(f"Fetched {len(df)} bars")
-                except Exception as exc:
-                    st.error(f"Fetch failed: {exc}")
+        if fetch_mode == "Recent Bars":
+            st.caption(
+                f"Estimated coverage: **{estimate_coverage(limit, timeframe)}**"
+                f" ({limit} × {timeframe})"
+            )
 
-        st.metric("Rows fetched", len(st.session_state.get("fetch_df", pd.DataFrame())))
+            if st.button("Fetch OHLCV", type="primary", width="stretch"):
+                with st.spinner(f"Fetching up to {limit} {symbol} {timeframe} bars from {exchange}..."):
+                    try:
+                        if limit <= 1000:
+                            df = fetch_ohlcv(exchange, symbol, timeframe, limit=limit)
+                        else:
+                            from datetime import datetime as _dt, timezone as _tz
+
+                            duration = limit * timeframe_to_timedelta(timeframe)
+                            end_dt = _dt.now(_tz.utc)
+                            start_dt = end_dt - duration
+                            df = fetch_ohlcv_range(
+                                exchange, symbol, timeframe,
+                                start=start_dt, end=end_dt,
+                            )
+                            if len(df) > limit:
+                                df = df.iloc[-limit:].reset_index(drop=True)
+
+                        st.session_state["fetch_df"] = df
+                        st.session_state["fetch_source"] = "fetched"
+                        st.session_state["fetch_requested"] = limit
+                        if len(df) < limit:
+                            st.warning(
+                                f"Requested {limit} bars, received {len(df)}. "
+                                f"The exchange may not have this much history."
+                            )
+                        else:
+                            st.success(f"Fetched {len(df)} bars")
+                    except Exception as exc:
+                        st.error(f"Fetch failed: {exc}")
+
+        else:
+            from datetime import datetime, timedelta, timezone
+
+            default_end = datetime.now(timezone.utc)
+            default_start = default_end - timedelta(days=30)
+
+            date_start = st.date_input(
+                "Start date (UTC)",
+                value=default_start.date(),
+                key="date_start",
+            )
+            date_end = st.date_input(
+                "End date (UTC)",
+                value=default_end.date(),
+                key="date_end",
+            )
+
+            if st.button("Fetch Date Range", type="primary", width="stretch"):
+                start_dt = datetime.combine(date_start, datetime.min.time(), tzinfo=timezone.utc)
+                end_dt = datetime.combine(date_end, datetime.max.time(), tzinfo=timezone.utc)
+                with st.spinner(
+                    f"Fetching {symbol} {timeframe} {date_start} → {date_end}..."
+                ):
+                    try:
+                        df = fetch_ohlcv_range(
+                            exchange, symbol, timeframe,
+                            start=start_dt, end=end_dt,
+                        )
+                        st.session_state["fetch_df"] = df
+                        st.session_state["fetch_source"] = "fetched"
+                        st.session_state["fetch_requested"] = None
+                        st.success(f"Fetched {len(df)} bars")
+                    except Exception as exc:
+                        st.error(f"Fetch failed: {exc}")
 
         if "fetch_df" in st.session_state and not st.session_state["fetch_df"].empty:
+            df = st.session_state["fetch_df"]
+            st.metric("Rows fetched", len(df))
+
+            # --- Source indicator ---
+            source_label = st.session_state.get("fetch_source", "unknown")
+            if source_label == "fetched":
+                requested = st.session_state.get("fetch_requested")
+                if requested:
+                    st.caption(f"Source: freshly fetched  |  Requested: {requested} bars  |  Received: {len(df)} bars")
+                else:
+                    st.caption("Source: freshly fetched")
+            elif source_label == "local":
+                st.caption("Source: loaded from local Parquet")
+
+            # --- Coverage summary ---
+            st.divider()
+            st.subheader("Data Coverage")
+
+            t_min = df["timestamp"].min()
+            t_max = df["timestamp"].max()
+            duration = t_max - t_min
+
+            c1, c2, c3 = st.columns(3)
+            c1.caption(f"Start: {t_min}")
+            c2.caption(f"End: {t_max}")
+            c3.caption(f"Duration: {duration}")
+
+            # --- Coverage delta ---
+            requested = st.session_state.get("fetch_requested")
+            if requested and len(df) < requested:
+                st.warning(
+                    f"Received {len(df)} of {requested} requested bars "
+                    f"({requested - len(df)} fewer). The exchange may not "
+                    f"have this much history for {timeframe}."
+                )
+
+            # --- Sizing warning ---
+            warning = dataset_sizing_warning(len(df), timeframe)
+            if warning:
+                st.warning(warning)
+
             st.divider()
             st.subheader("Save to Local")
 
             if st.button("Save Raw", width="stretch"):
-                df = st.session_state["fetch_df"]
                 path = save_ohlcv_parquet(df, exchange, symbol, timeframe, layer="raw")
                 st.success(f"Saved to {path}")
 
             if st.button("Save Processed", width="stretch"):
-                df = st.session_state["fetch_df"]
                 path = save_ohlcv_parquet(
                     df, exchange, symbol, timeframe, layer="processed"
                 )
@@ -132,16 +271,79 @@ with tab_fetch:
 
     with col2:
         if "fetch_df" in st.session_state and not st.session_state["fetch_df"].empty:
-            df = st.session_state["fetch_df"]
+            df_full = st.session_state["fetch_df"]
+
+            # --- Chart time range controls ---
+            st.caption("**Chart Display Controls**")
+            chart_col1, chart_col2 = st.columns(2)
+            with chart_col1:
+                chart_range = st.selectbox(
+                    "Time Range",
+                    ["Full range", "Last 7 days", "Last 30 days",
+                     "Last 90 days", "Custom range"],
+                    key="fetch_chart_range",
+                )
+            with chart_col2:
+                max_candles = st.selectbox(
+                    "Max Candles",
+                    [500, 1000, 2000, 5000],
+                    index=1,
+                    key="fetch_max_candles",
+                )
+
+            # Apply time range filter
+            now_utc = pd.Timestamp.now(tz="utc")
+            if chart_range == "Last 7 days":
+                df_view = filter_by_time_range(
+                    df_full, start=now_utc - pd.Timedelta(days=7), end=now_utc
+                )
+            elif chart_range == "Last 30 days":
+                df_view = filter_by_time_range(
+                    df_full, start=now_utc - pd.Timedelta(days=30), end=now_utc
+                )
+            elif chart_range == "Last 90 days":
+                df_view = filter_by_time_range(
+                    df_full, start=now_utc - pd.Timedelta(days=90), end=now_utc
+                )
+            else:
+                df_view = df_full  # Full range
+
+            # Aggregation for display
+            display_result = prepare_candlestick_display_data(df_view, max_bars=max_candles)
+            df_chart = display_result["df_chart"]
+            disp_summary = get_display_summary(df_full, df_view, display_result)
+
+            # Render candlestick chart from df_chart
             fig = candlestick_chart(
-                df, title=f"{exchange} {symbol} {timeframe}"
+                df_chart, title=f"{exchange} {symbol} {timeframe}"
             )
             st.plotly_chart(fig, width="stretch")
 
-            with st.expander("Raw Data Preview"):
-                st.dataframe(df.tail(20), width="stretch")
+            # Display summary
+            st.caption(
+                f"Full: {disp_summary['full_rows']} rows  |  "
+                f"View: {disp_summary['view_rows']} rows  |  "
+                f"Displayed: {disp_summary['displayed_candles']} candles  |  "
+                f"Mode: {disp_summary['display_mode']}"
+                + (
+                    f"  |  ~{disp_summary['approx_bars_per_candle']} bars/candle"
+                    if disp_summary['approx_bars_per_candle'] else ""
+                )
+            )
+
+            # Table preview
+            with st.expander("Data Preview"):
+                st.caption(
+                    f"Showing latest {min(DEFAULT_PREVIEW_ROWS, len(df_full))} "
+                    f"of {len(df_full)} total rows. Full data is used for "
+                    f"storage, features, modeling, and evaluation."
+                )
+                st.dataframe(df_full.tail(DEFAULT_PREVIEW_ROWS), width="stretch")
         else:
-            st.info("Click 'Fetch OHLCV' to load market data.")
+            if fetch_mode == "Recent Bars":
+                st.info("Click 'Fetch OHLCV' to load market data.")
+            else:
+                st.info("Select a date range and click 'Fetch Date Range' to load data.")
 
 # ---------------------------------------------------------------------------
 # Tab 2: Local Storage
@@ -161,20 +363,76 @@ with tab_local:
                     st.session_state["local_df"] = pd.DataFrame()
                 else:
                     st.session_state["local_df"] = df
+                    st.session_state["fetch_source"] = "local"
                     st.success(f"Loaded {len(df)} bars")
             except Exception as exc:
                 st.error(f"Load failed: {exc}")
 
     if "local_df" in st.session_state and not st.session_state["local_df"].empty:
-        df = st.session_state["local_df"]
+        df_full = st.session_state["local_df"]
+
+        st.caption("**Chart Display Controls**")
+        loc_col1, loc_col2 = st.columns(2)
+        with loc_col1:
+            local_chart_range = st.selectbox(
+                "Time Range",
+                ["Full range", "Last 7 days", "Last 30 days",
+                 "Last 90 days", "Custom range"],
+                key="local_chart_range",
+            )
+        with loc_col2:
+            local_max_candles = st.selectbox(
+                "Max Candles",
+                [500, 1000, 2000, 5000],
+                index=1,
+                key="local_max_candles",
+            )
+
+        now_utc = pd.Timestamp.now(tz="utc")
+        if local_chart_range == "Last 7 days":
+            df_view_local = filter_by_time_range(
+                df_full, start=now_utc - pd.Timedelta(days=7), end=now_utc
+            )
+        elif local_chart_range == "Last 30 days":
+            df_view_local = filter_by_time_range(
+                df_full, start=now_utc - pd.Timedelta(days=30), end=now_utc
+            )
+        elif local_chart_range == "Last 90 days":
+            df_view_local = filter_by_time_range(
+                df_full, start=now_utc - pd.Timedelta(days=90), end=now_utc
+            )
+        else:
+            df_view_local = df_full
+
+        local_display = prepare_candlestick_display_data(
+            df_view_local, max_bars=local_max_candles
+        )
+        local_chart_df = local_display["df_chart"]
+        local_summary = get_display_summary(df_full, df_view_local, local_display)
+
         fig = candlestick_chart(
-            df,
+            local_chart_df,
             title=f"{exchange} {symbol} {timeframe} ({layer})",
         )
         st.plotly_chart(fig, width="stretch")
 
+        st.caption(
+            f"Full: {local_summary['full_rows']} rows  |  "
+            f"View: {local_summary['view_rows']} rows  |  "
+            f"Displayed: {local_summary['displayed_candles']} candles  |  "
+            f"Mode: {local_summary['display_mode']}"
+            + (
+                f"  |  ~{local_summary['approx_bars_per_candle']} bars/candle"
+                if local_summary['approx_bars_per_candle'] else ""
+            )
+        )
+
         with st.expander("Data Preview"):
-            st.dataframe(df, width="stretch")
+            st.caption(
+                f"Showing latest {min(DEFAULT_PREVIEW_ROWS, len(df_full))} "
+                f"of {len(df_full)} total rows."
+            )
+            st.dataframe(df_full.tail(DEFAULT_PREVIEW_ROWS), width="stretch")
 
 # ---------------------------------------------------------------------------
 # Tab 3: Data Quality
@@ -191,13 +449,20 @@ with tab_quality:
     if source == "Fetched":
         if "fetch_df" in st.session_state and not st.session_state["fetch_df"].empty:
             df_source = st.session_state["fetch_df"]
-            source_label = "fetched"
+            source_label = "freshly fetched"
+            fetched_req = st.session_state.get("fetch_requested")
+            if fetched_req:
+                source_label += f" (requested {fetched_req} bars)"
     else:
         if "local_df" in st.session_state and not st.session_state["local_df"].empty:
             df_source = st.session_state["local_df"]
-            source_label = "local"
+            source_label = "loaded from local Parquet"
 
     if df_source is not None and not df_source.empty:
+        st.caption(f"Active data: **{source_label}** | Rows: {len(df_source)} | "
+                   f"Symbol: {df_source['symbol'].iloc[0] if 'symbol' in df_source.columns else 'N/A'} | "
+                   f"Timeframe: {df_source['timeframe'].iloc[0] if 'timeframe' in df_source.columns else 'N/A'}")
+
         quality = check_ohlcv_quality(df_source, timeframe)
 
         col1, col2, col3, col4 = st.columns(4)
@@ -566,3 +831,753 @@ with tab_models:
 
             with st.expander("Prediction Data Preview"):
                 st.dataframe(predictions.tail(50), width="stretch")
+
+        # -------------------------------------------------------------------
+        # Full Evaluation Report
+        # -------------------------------------------------------------------
+
+        st.divider()
+        st.subheader("Full Evaluation Report")
+        st.caption(
+            "Runs all task types × horizons × models in one batch. "
+            "Failed combinations are recorded as skipped with a reason. "
+            "All outputs are experimental — they do not constitute financial advice."
+        )
+
+        full_test_pct = st.slider(
+            "Full Report — Test Size (%)",
+            min_value=10,
+            max_value=50,
+            value=20,
+            step=5,
+            key="full_test_pct",
+        ) / 100.0
+
+        if st.button("Run Full Evaluation Report", type="primary", width="stretch"):
+            with st.spinner("Running full evaluation across all horizons..."):
+                try:
+                    report = run_full_evaluation_report(
+                        df_eval,
+                        task_types=("regression", "classification"),
+                        horizons=(1, 4, 24),
+                        test_size=full_test_pct,
+                    )
+                    report["summary"]["test_size_pct"] = full_test_pct * 100
+                    st.session_state["full_report"] = report
+                except Exception as exc:
+                    st.error(f"Full evaluation failed: {exc}")
+
+        if "full_report" in st.session_state:
+            report = st.session_state["full_report"]
+            summary = report["summary"]
+            metrics_df = report["metrics_df"]
+            skipped_df = report["skipped_df"]
+
+            import plotly.graph_objects as go
+            from sklearn.metrics import confusion_matrix
+
+            # --- Dataset summary ---
+            st.divider()
+            st.subheader("Dataset Summary")
+            ds_cols = st.columns(4)
+            ds_cols[0].metric("Rows", summary["row_count"])
+            ds_cols[1].metric("Features", summary["feature_count"])
+            ds_cols[2].metric("Combinations", summary["total_combinations"])
+            ds_cols[3].metric("Successful", summary["successful"])
+            st.caption(
+                f"Exchange: {summary['exchange']}  |  "
+                f"Symbol: {summary['symbol']}  |  "
+                f"Timeframe: {summary['timeframe']}"
+            )
+            st.caption(
+                f"Data range: {summary['min_timestamp']} → {summary['max_timestamp']}"
+            )
+            if not summary["lightgbm_available"]:
+                st.info("LightGBM is not installed. LightGBM models were skipped.")
+
+            # --- Skip / Failure log ---
+            if not skipped_df.empty:
+                st.divider()
+                st.subheader("Skipped Combinations")
+                st.dataframe(skipped_df, width="stretch", hide_index=True)
+                st.caption(
+                    "Each skipped model/horizon combination is listed with a reason. "
+                    "Common causes: missing target column, insufficient valid rows "
+                    "after NaN removal, or LightGBM not installed."
+                )
+
+            if metrics_df.empty:
+                st.info("No metrics were produced. All combinations were skipped.")
+            else:
+                # --- Full Metrics Table ---
+                st.divider()
+                st.subheader("Full Metrics Table")
+                st.dataframe(metrics_df, width="stretch", hide_index=True)
+
+                # --- Metric bar charts by model and horizon ---
+                st.divider()
+                st.subheader("Metrics by Model and Horizon")
+
+                reg_df = metrics_df[metrics_df["task_type"] == "regression"]
+                cls_df = metrics_df[metrics_df["task_type"] == "classification"]
+
+                # Regression bar charts
+                if not reg_df.empty:
+                    st.caption("**Regression**")
+                    reg_metrics = ["mae", "rmse", "directional_accuracy", "spearman_r"]
+                    reg_cols = st.columns(min(4, len(reg_metrics)))
+                    for i, metric in enumerate(reg_metrics):
+                        if metric not in reg_df.columns or reg_df[metric].dropna().empty:
+                            continue
+                        with reg_cols[i % len(reg_cols)]:
+                            pivot = reg_df.pivot_table(
+                                index="model_name", columns="horizon",
+                                values=metric, aggfunc="first"
+                            )
+                            fig_bar = go.Figure()
+                            for h in pivot.columns:
+                                fig_bar.add_trace(go.Bar(
+                                    name=f"h={h}", x=pivot.index, y=pivot[h],
+                                    text=[f"{v:.4f}" if pd.notna(v) else "" for v in pivot[h]],
+                                    textposition="auto",
+                                ))
+                            fig_bar.update_layout(
+                                title=metric.upper(),
+                                barmode="group",
+                                template="plotly_dark",
+                                height=300,
+                                margin=dict(t=40, b=80),
+                                xaxis_tickangle=-30,
+                            )
+                            st.plotly_chart(fig_bar, width="stretch")
+
+                # Classification bar charts
+                if not cls_df.empty:
+                    st.caption("**Classification**")
+                    cls_metrics = ["accuracy", "balanced_accuracy", "precision", "recall", "f1", "auc"]
+                    cls_cols = st.columns(min(3, len(cls_metrics)))
+                    for i, metric in enumerate(cls_metrics):
+                        if metric not in cls_df.columns or cls_df[metric].dropna().empty:
+                            continue
+                        with cls_cols[i % len(cls_cols)]:
+                            pivot = cls_df.pivot_table(
+                                index="model_name", columns="horizon",
+                                values=metric, aggfunc="first"
+                            )
+                            fig_bar = go.Figure()
+                            for h in pivot.columns:
+                                fig_bar.add_trace(go.Bar(
+                                    name=f"h={h}", x=pivot.index, y=pivot[h],
+                                    text=[f"{v:.4f}" if pd.notna(v) else "" for v in pivot[h]],
+                                    textposition="auto",
+                                ))
+                            fig_bar.update_layout(
+                                title=metric.replace("_", " ").title(),
+                                barmode="group",
+                                template="plotly_dark",
+                                height=300,
+                                margin=dict(t=40, b=80),
+                                xaxis_tickangle=-30,
+                            )
+                            st.plotly_chart(fig_bar, width="stretch")
+
+                # --- Best Model Summary table ---
+                st.divider()
+                st.subheader("Best Model Summary")
+                st.caption(
+                    "Best model by each metric per task type and horizon. "
+                    "\"Best\" refers only to the metric listed, under this "
+                    "specific historical test split — not overall superiority."
+                )
+
+                best_df = build_best_model_summary(metrics_df)
+                if not best_df.empty:
+                    # Format numeric columns
+                    for col in best_df.columns:
+                        if col.startswith("best_") and "_model" not in col:
+                            if "accuracy" in col or "f1" in col or "auc" in col or "dir" in col:
+                                best_df[col] = best_df[col].apply(
+                                    lambda x: f"{x:.4f}" if pd.notna(x) else ""
+                                )
+                            else:
+                                best_df[col] = best_df[col].apply(
+                                    lambda x: f"{x:.6f}" if pd.notna(x) else ""
+                                )
+                    st.dataframe(best_df, width="stretch", hide_index=True)
+
+                    st.download_button(
+                        label="Download Best Model Summary CSV",
+                        data=best_df.to_csv(index=False),
+                        file_name="best_model_summary.csv",
+                        mime="text/csv",
+                    )
+
+                # --- Detailed model view ---
+                st.divider()
+                st.subheader("Detailed Model View")
+                st.caption("Select a task type, horizon, and model to inspect predictions.")
+
+                detail_col1, detail_col2, detail_col3 = st.columns(3)
+                all_task_types = sorted(metrics_df["task_type"].unique())
+                with detail_col1:
+                    detail_tt = st.selectbox(
+                        "Task Type", all_task_types, key="detail_tt"
+                    )
+                tt_subset = metrics_df[metrics_df["task_type"] == detail_tt]
+                all_horizons = sorted(tt_subset["horizon"].unique())
+                with detail_col2:
+                    detail_h = st.selectbox(
+                        "Horizon", all_horizons, key="detail_h"
+                    )
+                h_subset = tt_subset[tt_subset["horizon"] == detail_h]
+                all_models = sorted(h_subset["model_name"].unique())
+                with detail_col3:
+                    detail_model = st.selectbox(
+                        "Model", all_models, key="detail_model"
+                    )
+
+                # Re-run the single model to get predictions for charts
+                target_col = get_target_column(detail_tt, detail_h)
+                if target_col in df_eval.columns:
+                    detail_result = compare_baselines_and_models(
+                        df_eval,
+                        task_type=detail_tt,
+                        horizon=detail_h,
+                        test_size=full_test_pct,
+                        include_tabular=True,
+                    )
+                    detail_preds = detail_result["predictions"]
+                    detail_preds = detail_preds[
+                        detail_preds["model_name"] == detail_model
+                    ]
+
+                    if not detail_preds.empty:
+                        chart_col1, chart_col2 = st.columns(2)
+
+                        with chart_col1:
+                            # y_true vs y_pred line chart
+                            fig_line = go.Figure()
+                            fig_line.add_trace(go.Scatter(
+                                x=detail_preds["timestamp"],
+                                y=detail_preds["y_true"],
+                                mode="lines+markers",
+                                name="Actual",
+                                marker=dict(size=3),
+                            ))
+                            fig_line.add_trace(go.Scatter(
+                                x=detail_preds["timestamp"],
+                                y=detail_preds["y_pred"],
+                                mode="lines+markers",
+                                name="Predicted",
+                                marker=dict(size=3),
+                            ))
+                            fig_line.update_layout(
+                                title=f"{detail_model} — {target_col}",
+                                xaxis_title="Time (UTC)",
+                                template="plotly_dark",
+                                height=350,
+                            )
+                            st.plotly_chart(fig_line, width="stretch")
+
+                        with chart_col2:
+                            if detail_tt == "regression":
+                                # Scatter: y_true vs y_pred
+                                fig_scatter = go.Figure()
+                                fig_scatter.add_trace(go.Scatter(
+                                    x=detail_preds["y_true"],
+                                    y=detail_preds["y_pred"],
+                                    mode="markers",
+                                    marker=dict(size=5, opacity=0.6),
+                                    name="Predictions",
+                                ))
+                                # Identity line
+                                vals = detail_preds["y_true"]
+                                lo, hi = float(vals.min()), float(vals.max())
+                                fig_scatter.add_trace(go.Scatter(
+                                    x=[lo, hi], y=[lo, hi],
+                                    mode="lines",
+                                    name="Perfect",
+                                    line=dict(dash="dash", color="gray"),
+                                ))
+                                fig_scatter.update_layout(
+                                    title=f"{detail_model} — Actual vs Predicted",
+                                    xaxis_title="Actual",
+                                    yaxis_title="Predicted",
+                                    template="plotly_dark",
+                                    height=350,
+                                )
+                                st.plotly_chart(fig_scatter, width="stretch")
+
+                                # Residual plot
+                                residuals = (
+                                    detail_preds["y_true"].values
+                                    - detail_preds["y_pred"].values
+                                )
+                                fig_res = go.Figure()
+                                fig_res.add_trace(go.Scatter(
+                                    x=detail_preds["timestamp"],
+                                    y=residuals,
+                                    mode="markers",
+                                    marker=dict(size=4, opacity=0.6),
+                                    name="Residuals",
+                                ))
+                                fig_res.add_hline(
+                                    y=0, line_dash="dash", line_color="gray"
+                                )
+                                fig_res.update_layout(
+                                    title=f"{detail_model} — Residuals",
+                                    xaxis_title="Time (UTC)",
+                                    yaxis_title="Residual (Actual − Predicted)",
+                                    template="plotly_dark",
+                                    height=300,
+                                )
+                                st.plotly_chart(fig_res, width="stretch")
+                            else:
+                                # Confusion matrix
+                                yt = detail_preds["y_true"].values
+                                yp = detail_preds["y_pred"].values
+                                cm = confusion_matrix(yt, yp)
+                                labels = ["Down (0)", "Up (1)"]
+                                fig_cm = go.Figure(data=go.Heatmap(
+                                    z=cm,
+                                    x=labels,
+                                    y=labels,
+                                    text=cm,
+                                    texttemplate="%{text}",
+                                    colorscale="Blues",
+                                    showscale=False,
+                                ))
+                                fig_cm.update_layout(
+                                    title=f"{detail_model} — Confusion Matrix",
+                                    xaxis_title="Predicted",
+                                    yaxis_title="Actual",
+                                    template="plotly_dark",
+                                    height=350,
+                                )
+                                st.plotly_chart(fig_cm, width="stretch")
+
+                                # Probability chart if available
+                                if "y_prob" in detail_preds.columns:
+                                    fig_prob = go.Figure()
+                                    fig_prob.add_trace(go.Scatter(
+                                        x=detail_preds["timestamp"],
+                                        y=detail_preds["y_prob"],
+                                        mode="lines+markers",
+                                        name="Predicted Probability",
+                                        marker=dict(size=3),
+                                    ))
+                                    fig_prob.add_hline(
+                                        y=0.5, line_dash="dash", line_color="gray",
+                                        annotation_text="0.5 threshold"
+                                    )
+                                    fig_prob.update_layout(
+                                        title=f"{detail_model} — Probability",
+                                        xaxis_title="Time (UTC)",
+                                        yaxis_title="P(Up)",
+                                        template="plotly_dark",
+                                        height=300,
+                                    )
+                                    st.plotly_chart(fig_prob, width="stretch")
+
+                # --- Cautious textual analysis ---
+                st.divider()
+                st.subheader("Report Analysis")
+                analysis_text = generate_report_analysis(
+                    metrics_df, summary, skipped_df
+                )
+                st.markdown(analysis_text)
+
+                st.download_button(
+                    label="Download Analysis (Markdown)",
+                    data=analysis_text,
+                    file_name="full_evaluation_analysis.md",
+                    mime="text/markdown",
+                )
+
+                # --- Downloads ---
+                st.divider()
+                st.subheader("Downloads")
+                dl_col1, dl_col2 = st.columns(2)
+                with dl_col1:
+                    st.download_button(
+                        label="Download Metrics CSV",
+                        data=metrics_df.to_csv(index=False),
+                        file_name="full_evaluation_metrics.csv",
+                        mime="text/csv",
+                    )
+                with dl_col2:
+                    st.download_button(
+                        label="Download Skipped CSV",
+                        data=skipped_df.to_csv(index=False),
+                        file_name="full_evaluation_skipped.csv",
+                        mime="text/csv",
+                    )
+
+        # -------------------------------------------------------------------
+        # Forward Forecast
+        # -------------------------------------------------------------------
+
+        st.divider()
+        st.subheader("Forward Forecast")
+        st.caption(
+            "Train a model on ALL available labeled historical data and produce "
+            "an experimental forecast. "
+            "This is NOT a trading signal — it is a research output that uses "
+            "the most recent observation for which the future outcome is unknown."
+        )
+
+        forecast_source = st.radio(
+            "Forecast Data",
+            ["Use Full Report Features", "Use Session Features"],
+            horizontal=True,
+            key="forecast_source",
+        )
+
+        df_forecast: pd.DataFrame | None = None
+
+        if forecast_source == "Use Full Report Features":
+            df_forecast = df_eval
+        else:
+            if "features_df" in st.session_state and not st.session_state["features_df"].empty:
+                df_forecast = st.session_state["features_df"]
+            else:
+                st.warning("No session features. Run the feature pipeline first.")
+
+        if df_forecast is not None and not df_forecast.empty:
+            # --- Single-Point Forecast ---
+            st.divider()
+            st.subheader("Single-Point Forecast")
+
+            fc_col1, fc_col2, fc_col3 = st.columns(3)
+
+            with fc_col1:
+                fc_task_type = st.selectbox(
+                    "Task Type",
+                    ["regression", "classification"],
+                    key="fc_task_type",
+                )
+            with fc_col2:
+                fc_horizon = st.selectbox(
+                    "Horizon",
+                    [1, 4, 24],
+                    key="fc_horizon",
+                )
+            with fc_col3:
+                fc_target = get_target_column(fc_task_type, fc_horizon)
+                avail_models: list[str] = []
+                if fc_task_type == "regression":
+                    avail_models = ["Ridge"]
+                    if _HAS_LIGHTGBM:
+                        avail_models.append("LightGBM")
+                    avail_models.extend(["Last Return", "Moving Average", "Zero Return"])
+                else:
+                    avail_models = ["Logistic Regression"]
+                    if _HAS_LIGHTGBM:
+                        avail_models.append("LightGBM")
+                    avail_models.extend(["Momentum Direction", "Majority Class"])
+
+                fc_model = st.selectbox(
+                    "Model",
+                    avail_models,
+                    key="fc_model",
+                )
+
+            fc_feature_cols = get_default_feature_columns(df_forecast)
+            st.caption(f"Target: **{fc_target}** | Features: {len(fc_feature_cols)} columns")
+            st.caption(
+                "Training uses all rows with valid features and known targets. "
+                "The forecast is the latest row with valid features — its target "
+                "is unknown (future outcome)."
+            )
+
+            if st.button("Run Forward Forecast", type="primary", width="stretch"):
+                with st.spinner(
+                    f"Training {fc_model} on all labeled data, "
+                    f"forecasting {fc_target}..."
+                ):
+                    try:
+                        fc_result = forward_forecast(
+                            df_forecast,
+                            task_type=fc_task_type,
+                            horizon=fc_horizon,
+                            model_name=fc_model,
+                            feature_columns=fc_feature_cols,
+                        )
+                        st.session_state["forecast_result"] = fc_result
+                    except Exception as exc:
+                        st.error(f"Forward forecast failed: {exc}")
+
+            if "forecast_result" in st.session_state:
+                fr = st.session_state["forecast_result"]
+
+                st.divider()
+                st.subheader("Forecast Output")
+
+                if "error" in fr:
+                    st.error(fr["error"])
+                else:
+                    if fc_task_type == "regression":
+                        fc_cols = st.columns(3)
+                        fc_cols[0].metric("Latest Timestamp", str(fr["latest_timestamp"]))
+                        fc_cols[1].metric("Horizon (bars)", fr["horizon"])
+                        fc_cols[2].metric(
+                            "Predicted Log Return",
+                            f"{fr['predicted_log_return']:.8f}",
+                        )
+
+                        fc_cols2 = st.columns(3)
+                        fc_cols2[0].metric(
+                            "Latest Close",
+                            f"{fr['latest_close']:.4f}" if fr.get("latest_close") else "N/A",
+                        )
+                        fc_cols2[1].metric(
+                            "Implied Future Close",
+                            f"{fr['estimated_future_close']:.4f}" if fr.get("estimated_future_close") else "N/A",
+                        )
+                        fc_cols2[2].metric("Training Rows", fr["training_rows"])
+
+                        if "historical_mae" in fr:
+                            st.caption(
+                                f"Historical test MAE (for context only): "
+                                f"{fr['historical_mae']:.6f}"
+                            )
+                        if "historical_rmse" in fr:
+                            st.caption(
+                                f"Historical test RMSE (for context only): "
+                                f"{fr['historical_rmse']:.6f}"
+                            )
+                    else:
+                        fc_cols = st.columns(3)
+                        fc_cols[0].metric("Latest Timestamp", str(fr["latest_timestamp"]))
+                        fc_cols[1].metric("Horizon (bars)", fr["horizon"])
+                        fc_cols[2].metric(
+                            "Predicted Direction",
+                            "Up (1)" if fr["predicted_class"] == 1 else "Down (0)",
+                        )
+
+                        if fr.get("predicted_probability") is not None:
+                            fc_cols2 = st.columns(3)
+                            fc_cols2[0].metric(
+                                "Predicted Probability",
+                                f"{fr['predicted_probability']:.4f}",
+                            )
+                            fc_cols2[1].metric("Training Rows", fr["training_rows"])
+
+                    st.warning(
+                        "This is an **experimental forecast** based on historical "
+                        "patterns. It does NOT constitute financial advice. "
+                        "Crypto markets are noisy, non-stationary, and high-risk."
+                    )
+
+                    # Save forecast
+                    st.divider()
+                    st.subheader("Save Forecast")
+                    if st.button("Save Forecast to Parquet", width="stretch"):
+                        fc_save = pd.DataFrame([{
+                            "timestamp": fr["latest_timestamp"],
+                            "horizon": fr["horizon"],
+                            "target_column": fc_target,
+                            "model_name": fc_model,
+                            **{k: v for k, v in fr.items()
+                               if k not in ("latest_timestamp", "horizon",
+                                            "latest_close", "training_rows",
+                                            "historical_mae", "historical_rmse",
+                                            "historical_balanced_accuracy",
+                                            "historical_directional_accuracy")},
+                        }])
+                        path = save_forecast_parquet(
+                            fc_save, exchange=exchange, symbol=symbol,
+                            timeframe=timeframe, model_name=fc_model,
+                            target_column=fc_target,
+                        )
+                        st.success(f"Saved forecast to {path}")
+
+            # --- Forecast Path Chart ---
+            st.divider()
+            st.subheader("Forecast Path Chart")
+            st.caption(
+                "Train regression models on supported horizons (1, 4, 24) and "
+                "plot an experimental future close-price path. "
+                "Only sparse direct-horizon points are predicted — intermediate "
+                "points are connected by interpolation for visualization."
+            )
+
+            fp_col1, fp_col2, fp_col3 = st.columns(3)
+
+            with fp_col1:
+                fp_model = st.selectbox(
+                    "Regression Model",
+                    ["Ridge"] + (["LightGBM"] if _HAS_LIGHTGBM else []),
+                    key="fp_model",
+                )
+            with fp_col2:
+                fp_path_len = st.selectbox(
+                    "Path Length (bars)",
+                    [6, 12, 24, 48, 72, 168],
+                    index=2,  # default 24
+                    key="fp_path_len",
+                )
+            with fp_col3:
+                chart_history_bars = st.selectbox(
+                    "Chart History (bars)",
+                    [100, 200, 500, 1000],
+                    index=1,  # default 200
+                    key="chart_history_bars",
+                )
+
+            if st.button("Generate Forecast Path", type="primary", width="stretch"):
+                with st.spinner("Generating sparse direct-horizon forecast path..."):
+                    try:
+                        fp_result = forecast_path(
+                            df_forecast,
+                            model_name=fp_model,
+                            path_length=fp_path_len,
+                            feature_columns=fc_feature_cols,
+                            timeframe=timeframe,
+                        )
+                        st.session_state["forecast_path_result"] = fp_result
+                    except Exception as exc:
+                        st.error(f"Forecast path failed: {exc}")
+
+            if "forecast_path_result" in st.session_state:
+                fpr = st.session_state["forecast_path_result"]
+
+                if "error" in fpr:
+                    st.error(fpr["error"])
+                else:
+                    # --- Build chart ---
+                    import plotly.graph_objects as go
+
+                    chart_df = fpr["chart_history"]
+                    latest_ts = fpr["latest_timestamp"]
+
+                    # Restrict to requested chart history
+                    if len(chart_df) > chart_history_bars:
+                        chart_df = chart_df.iloc[-chart_history_bars:]
+
+                    fig_fp = go.Figure()
+
+                    # Add candlestick for actual data
+                    if all(c in chart_df.columns for c in ["open", "high", "low", "close"]):
+                        fig_fp.add_trace(go.Candlestick(
+                            x=chart_df["timestamp"],
+                            open=chart_df["open"],
+                            high=chart_df["high"],
+                            low=chart_df["low"],
+                            close=chart_df["close"],
+                            name="Actual OHLCV",
+                            increasing_line_color="#26a69a",
+                            decreasing_line_color="#ef5350",
+                        ))
+
+                    # Add predicted close path
+                    points = [p for p in fpr["path_points"] if "error" not in p]
+                    if points:
+                        # Start from latest observed close
+                        path_ts = [latest_ts]
+                        path_closes = [fpr["latest_close"]]
+
+                        for p in points:
+                            path_ts.append(p["forecast_timestamp"])
+                            path_closes.append(p["estimated_future_close"])
+
+                        fig_fp.add_trace(go.Scatter(
+                            x=path_ts,
+                            y=path_closes,
+                            mode="lines+markers",
+                            name="Experimental Forecast Path",
+                            line=dict(color="#ffa726", width=2, dash="dash"),
+                            marker=dict(size=8, symbol="diamond", color="#ffa726"),
+                        ))
+
+                    # Vertical marker at latest observed timestamp
+                    y_min = min(
+                        chart_df["low"].min() if "low" in chart_df.columns else path_closes[0],
+                        min(path_closes),
+                    )
+                    y_max = max(
+                        chart_df["high"].max() if "high" in chart_df.columns else path_closes[0],
+                        max(path_closes),
+                    )
+                    fig_fp.add_vline(
+                        x=latest_ts, line_width=1, line_dash="dot",
+                        line_color="gray",
+                        annotation_text="Latest observed",
+                    )
+
+                    fig_fp.update_layout(
+                        title=(
+                            f"{fp_model} — Experimental Forecast Path "
+                            f"({symbol} {timeframe})"
+                        ),
+                        xaxis_title="Time (UTC)",
+                        yaxis_title="Close Price",
+                        template="plotly_dark",
+                        height=500,
+                        hovermode="x unified",
+                    )
+
+                    # Add padding around forecast
+                    if points:
+                        last_future_ts = points[-1]["forecast_timestamp"]
+                        fig_fp.update_xaxes(
+                            range=[
+                                chart_df["timestamp"].min() if not chart_df.empty else latest_ts,
+                                last_future_ts,
+                            ]
+                        )
+
+                    st.plotly_chart(fig_fp, width="stretch")
+
+                    # --- Forecast path table ---
+                    st.divider()
+                    st.subheader("Forecast Path Table")
+                    st.caption(
+                        "Sparse direct-horizon forecast path. "
+                        "Only supported horizons (1, 4, 24) are predicted. "
+                        "Missing intermediate steps are interpolated on the chart "
+                        "for visualization only."
+                    )
+
+                    table_rows = []
+                    for p in fpr["path_points"]:
+                        row = {
+                            "step": p.get("forecast_step", p.get("horizon")),
+                            "timestamp": p.get("forecast_timestamp", ""),
+                            "target": p.get("target_column", ""),
+                            "predicted_log_return": (
+                                f"{p['predicted_log_return']:.8f}"
+                                if "predicted_log_return" in p else "N/A"
+                            ),
+                            "estimated_close": (
+                                f"{p['estimated_future_close']:.4f}"
+                                if "estimated_future_close" in p else "N/A"
+                            ),
+                        }
+                        if "error" in p:
+                            row["error"] = p["error"]
+                        table_rows.append(row)
+                    table_df = pd.DataFrame(table_rows)
+                    st.dataframe(table_df, width="stretch", hide_index=True)
+
+                    # Context info
+                    st.caption(
+                        f"Latest observed: {fpr['latest_timestamp']} | "
+                        f"Latest close: {fpr['latest_close']:.4f} | "
+                        f"Model: {fpr['model_name']} | "
+                        f"Training rows: {fpr['training_rows']}"
+                    )
+
+                    # Cautions
+                    st.warning(
+                        "**Experimental forward forecast based on the selected "
+                        "model and available historical features.**\n\n"
+                        "This is not a trading signal or investment advice. "
+                        "The forecast path is model-estimated and may be unstable, "
+                        "especially with small datasets. "
+                        "Crypto markets are noisy, non-stationary, and high-risk. "
+                        "Past patterns do not guarantee future outcomes.\n\n"
+                        "Only horizons 1, 4, and 24 bars are directly predicted "
+                        "(sparse direct-horizon). The connecting line is "
+                        "interpolated for visualization."
+                    )

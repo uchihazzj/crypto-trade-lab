@@ -47,8 +47,25 @@ def chronological_train_test_split(
 
     df_sorted = df.sort_values(time_col).reset_index(drop=True)
 
+    # Validate timestamps are monotonic after sorting
+    if not df_sorted[time_col].is_monotonic_increasing:
+        raise ValueError(
+            f"Timestamps are not monotonic after sorting by {time_col!r}. "
+            f"Check for null or duplicate timestamp values."
+        )
+
     train = df_sorted.iloc[:-n_test]
     test = df_sorted.iloc[-n_test:]
+
+    # Defensive: train must be strictly before test
+    if len(train) > 0 and len(test) > 0:
+        train_max = train[time_col].max()
+        test_min = test[time_col].min()
+        if train_max >= test_min:
+            raise ValueError(
+                f"Chronological order violated: train max {train_max} >= "
+                f"test min {test_min}. Check for null timestamps."
+            )
 
     return train, test
 

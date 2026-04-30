@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 import numpy as np
+import pandas as pd
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -86,13 +87,18 @@ class LightGBMRegressor:
         kwargs.setdefault("verbosity", -1)
         kwargs.setdefault("random_state", 42)
         self._model = lgb.LGBMRegressor(**kwargs)
+        self._feature_names_: list[str] = []
+
+    def _as_dataframe(self, X: np.ndarray) -> pd.DataFrame:
+        return pd.DataFrame(X, columns=self._feature_names_)
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "LightGBMRegressor":
-        self._model.fit(X, y)
+        self._feature_names_ = [f"f{i}" for i in range(X.shape[1])]
+        self._model.fit(self._as_dataframe(X), y)
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        return self._model.predict(X)
+        return self._model.predict(self._as_dataframe(X))
 
 
 class LightGBMClassifier:
@@ -109,13 +115,18 @@ class LightGBMClassifier:
         kwargs.setdefault("random_state", 42)
         kwargs.setdefault("class_weight", "balanced")
         self._model = lgb.LGBMClassifier(**kwargs)
+        self._feature_names_: list[str] = []
+
+    def _as_dataframe(self, X: np.ndarray) -> pd.DataFrame:
+        return pd.DataFrame(X, columns=self._feature_names_)
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "LightGBMClassifier":
-        self._model.fit(X, y)
+        self._feature_names_ = [f"f{i}" for i in range(X.shape[1])]
+        self._model.fit(self._as_dataframe(X), y)
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        return self._model.predict(X)
+        return self._model.predict(self._as_dataframe(X))
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        return self._model.predict_proba(X)[:, 1]
+        return self._model.predict_proba(self._as_dataframe(X))[:, 1]

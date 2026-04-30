@@ -6,6 +6,8 @@ Returns empty dict if no valid samples remain.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from sklearn.metrics import (
     accuracy_score,
@@ -21,6 +23,7 @@ from sklearn.metrics import (
 # scipy is optional — spearman correlation only computed if available.
 try:
     from scipy.stats import spearmanr as _spearmanr
+    from scipy.stats import ConstantInputWarning
 
     _HAS_SCIPY = True
 except ImportError:  # pragma: no cover
@@ -59,8 +62,13 @@ def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, floa
     }
 
     if _HAS_SCIPY:
-        rho, _ = _spearmanr(y_t, y_p)
-        result["spearman_r"] = float(rho)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", category=ConstantInputWarning)
+            try:
+                rho, _ = _spearmanr(y_t, y_p)
+                result["spearman_r"] = float(rho)
+            except ConstantInputWarning:
+                result["spearman_r"] = float("nan")
 
     return result
 

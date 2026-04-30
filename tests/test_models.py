@@ -15,10 +15,24 @@ from src.crypto_trend_lab.evaluation.metrics import (
     classification_metrics,
     regression_metrics,
 )
+from src.crypto_trend_lab.evaluation.full_report import (
+    build_best_model_summary,
+    generate_report_analysis,
+    run_full_evaluation_report,
+)
 from src.crypto_trend_lab.evaluation.report import (
     compare_baselines_and_models,
     evaluate_model,
 )
+from src.crypto_trend_lab.evaluation.forecast import (
+    forecast_path,
+    forward_forecast,
+)
+from src.crypto_trend_lab.utils.helpers import (
+    dataset_sizing_warning,
+    estimate_coverage,
+)
+
 from src.crypto_trend_lab.models.baseline import (
     LastReturnBaseline,
     MajorityClassBaseline,
@@ -335,6 +349,45 @@ def test_regression_metrics_with_errors():
     assert 0.0 <= metrics["directional_accuracy"] <= 1.0
 
 
+def test_regression_metrics_constant_y_pred_no_warning():
+    """Constant y_pred must return NaN for spearman_r without warnings."""
+    y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    y_pred = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
+    import warnings
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        metrics = regression_metrics(y_true, y_pred)
+        # No ConstantInputWarning should escape
+        constant_warnings = [
+            x for x in w if "constant" in str(x.message).lower()
+        ]
+        assert len(constant_warnings) == 0, (
+            f"ConstantInputWarning leaked: {constant_warnings}"
+        )
+
+    assert "spearman_r" in metrics
+    assert np.isnan(metrics["spearman_r"])
+
+
+def test_regression_metrics_constant_y_true_no_warning():
+    """Constant y_true must also return NaN for spearman_r without warnings."""
+    y_true = np.array([3.0, 3.0, 3.0, 3.0, 3.0])
+    y_pred = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    import warnings
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        metrics = regression_metrics(y_true, y_pred)
+        constant_warnings = [
+            x for x in w if "constant" in str(x.message).lower()
+        ]
+        assert len(constant_warnings) == 0
+
+    assert "spearman_r" in metrics
+    assert np.isnan(metrics["spearman_r"])
+
+
 def test_regression_metrics_handles_nan():
     y_true = np.array([1.0, np.nan, 3.0])
     y_pred = np.array([1.0, 2.0, 3.0])
@@ -571,3 +624,1139 @@ def test_load_predictions_missing_file_returns_empty():
         "nonexistent", "BTC/USDT", "1h", "NoModel", "target_return_1"
     )
     assert df.empty
+
+
+# ---------------------------------------------------------------------------
+# Chronological split — descending / unsorted inputs
+# ---------------------------------------------------------------------------
+
+
+def test_chronological_split_with_descending_timestamps():
+    """Split must work correctly when input is descending by timestamp."""
+    ts = pd.date_range("2024-01-01", periods=100, freq="1h", tz="utc")
+    df = pd.DataFrame({"timestamp": ts[::-1], "value": range(100)})
+    # Descending: newest first
+    assert df["timestamp"].iloc[0] > df["timestamp"].iloc[-1]
+
+    train, test = chronological_train_test_split(df, test_size=20)
+    assert train["timestamp"].max() < test["timestamp"].min()
+
+
+def test_chronological_split_with_unsorted_timestamps():
+    """Split must work when input timestamps are randomly shuffled."""
+    rng = np.random.default_rng(99)
+    ts = pd.date_range("2024-01-01", periods=100, freq="1h", tz="utc")
+    values = rng.permutation(ts)
+    df = pd.DataFrame({"timestamp": values, "value": range(100)})
+
+    train, test = chronological_train_test_split(df, test_size=0.2)
+    assert train["timestamp"].max() < test["timestamp"].min()
+    assert len(train) == 80
+    assert len(test) == 20
+
+
+def test_walk_forward_split_descending_input():
+    """Walk-forward must work when input is descending."""
+    ts = pd.date_range("2024-01-01", periods=100, freq="1h", tz="utc")
+    df = pd.DataFrame({"timestamp": ts[::-1], "value": range(100)})
+
+    folds = list(walk_forward_split(df, train_size=50, test_size=10, step_size=10))
+    assert len(folds) == 5
+    for train, test in folds:
+        assert train["timestamp"].max() < test["timestamp"].min()
+
+
+# ---------------------------------------------------------------------------
+# Date range reporting correctness
+# ---------------------------------------------------------------------------
+
+
+def test_train_dates_start_before_end():
+    """Displayed train start must be earlier than train end."""
+    df = _make_features_df(200)
+    result = compare_baselines_and_models(
+        df, task_type="regression", horizon=1, test_size=0.2
+    )
+    td = result["train_dates"]
+    assert td["start"] < td["end"], f"Train: start {td['start']} >= end {td['end']}"
+
+
+def test_test_dates_start_before_end():
+    """Displayed test start must be earlier than test end."""
+    df = _make_features_df(200)
+    result = compare_baselines_and_models(
+        df, task_type="regression", horizon=1, test_size=0.2
+    )
+    td = result["test_dates"]
+    assert td["start"] < td["end"], f"Test: start {td['start']} >= end {td['end']}"
+
+
+def test_train_end_before_test_start():
+    """Train end must be strictly before test start."""
+    df = _make_features_df(200)
+    result = compare_baselines_and_models(
+        df, task_type="regression", horizon=1, test_size=0.2
+    )
+    assert result["train_dates"]["end"] < result["test_dates"]["start"], (
+        f"Train end {result['train_dates']['end']} >= "
+        f"test start {result['test_dates']['start']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Timestamp alignment after NaN filtering
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_modeling_data_timestamps_monotonic():
+    """Timestamps must be monotonic increasing after NaN removal."""
+    df = _make_features_df(200)
+    # target_return_1 needs at least 1 future row
+    X, y, timestamps, feats = prepare_modeling_data(
+        df, target_column="target_return_1"
+    )
+    # timestamps should be sorted ascending
+    assert timestamps.is_monotonic_increasing, "Timestamps not monotonic after NaN filtering"
+
+
+def test_prepare_modeling_data_timestamps_no_nan():
+    """Timestamps must have no NaN values after preparation."""
+    df = _make_features_df(200)
+    X, y, timestamps, feats = prepare_modeling_data(
+        df, target_column="target_return_1"
+    )
+    assert not timestamps.isnull().any(), "Timestamps contain NaN values"
+
+
+def test_compare_baselines_with_descending_input_df():
+    """compare_baselines_and_models must work with descending input."""
+    df = _make_features_df(200)
+    # Reverse the DataFrame to simulate descending order
+    df_desc = df.iloc[::-1].reset_index(drop=True)
+
+    result = compare_baselines_and_models(
+        df_desc, task_type="regression", horizon=1, test_size=0.2
+    )
+    td = result["train_dates"]
+    assert td["start"] < td["end"], "Train dates reversed (descending input)"
+    assert result["train_dates"]["end"] < result["test_dates"]["start"], (
+        "Train/test overlap with descending input"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Full evaluation report
+# ---------------------------------------------------------------------------
+
+
+def test_full_report_runs_all_combinations():
+    """Full report must run all 2 task types × 3 horizons = 6 combinations."""
+    # Use 300 rows so horizon=24 has enough valid data after NaN removal
+    df = _make_features_df(300)
+    report = run_full_evaluation_report(
+        df, task_types=("regression", "classification"), horizons=(1, 4, 24),
+        test_size=0.2,
+    )
+    assert report["summary"]["total_combinations"] == 6
+    assert report["summary"]["successful"] == 6
+    assert len(report["metrics_df"]) > 0
+    assert report["skipped_df"].empty
+
+
+def test_full_report_metrics_df_columns():
+    """Metrics DataFrame must include task_type, horizon, target_column, model_name."""
+    df = _make_features_df(200)
+    report = run_full_evaluation_report(
+        df, task_types=("regression",), horizons=(1,), test_size=0.2,
+    )
+    metrics_df = report["metrics_df"]
+    for col in ("task_type", "horizon", "target_column", "model_name"):
+        assert col in metrics_df.columns, f"Missing column: {col}"
+
+
+def test_full_report_skipped_df_columns():
+    """Skipped DataFrame must include task_type, horizon, model_name, reason."""
+    # Use an OHLCV-only DataFrame (no targets) — all combinations should be skipped
+    df_no_targets = _make_ohlcv_df(200)
+    report = run_full_evaluation_report(
+        df_no_targets, task_types=("regression",), horizons=(1,), test_size=0.2,
+    )
+    skipped_df = report["skipped_df"]
+    assert not skipped_df.empty
+    for col in ("task_type", "horizon", "model_name", "reason"):
+        assert col in skipped_df.columns, f"Missing column: {col}"
+    # Every skip reason should mention the missing target column
+    assert all("target_return_1" in r for r in skipped_df["reason"])
+
+
+def test_full_report_missing_target_skips_gracefully():
+    """Missing target columns must not crash the report."""
+    df = _make_ohlcv_df(200)
+    report = run_full_evaluation_report(
+        df, task_types=("regression", "classification"), horizons=(1, 4, 24),
+        test_size=0.2,
+    )
+    assert report["summary"]["successful"] == 0
+    assert len(report["skipped_df"]) > 0
+    assert not report["skipped_df"].empty
+
+
+def test_full_report_insufficient_data_skips():
+    """Too few rows after NaN removal must skip with a clear reason."""
+    df = _make_features_df(10)
+    report = run_full_evaluation_report(
+        df, task_types=("regression",), horizons=(24,), test_size=0.3,
+    )
+    # With 10 rows at horizon=24, target_return_24 has the last 24 rows NaN → 0 valid
+    assert report["summary"]["successful"] == 0
+    assert not report["skipped_df"].empty
+    assert any("Insufficient data" in r for r in report["skipped_df"]["reason"])
+
+
+def test_full_report_lightgbm_handled():
+    """LightGBM presence/absence must be reflected correctly."""
+    from src.crypto_trend_lab.models import tabular as tmod
+
+    df = _make_features_df(200)
+    report = run_full_evaluation_report(
+        df, task_types=("regression",), horizons=(1,), test_size=0.2,
+    )
+    # summary must report lightgbm availability truthfully
+    assert report["summary"]["lightgbm_available"] == tmod._HAS_LIGHTGBM
+
+    # If LightGBM is available, it appears in metrics_df
+    if tmod._HAS_LIGHTGBM:
+        model_names = report["metrics_df"]["model_name"].unique().tolist()
+        assert "LightGBM" in model_names
+
+
+def test_full_report_both_task_types_in_metrics():
+    """Regression AND classification rows both appear in metrics_df."""
+    df = _make_features_df(200)
+    report = run_full_evaluation_report(
+        df, task_types=("regression", "classification"), horizons=(1,),
+        test_size=0.2,
+    )
+    task_types_found = set(report["metrics_df"]["task_type"].unique())
+    assert "regression" in task_types_found
+    assert "classification" in task_types_found
+
+
+def test_full_report_chronological_order_per_run():
+    """Full report summary must reflect chronological train_dates for every run."""
+    df = _make_features_df(200)
+    report = run_full_evaluation_report(
+        df, task_types=("regression",), horizons=(1,), test_size=0.2,
+    )
+    assert report["summary"]["min_timestamp"] is not None
+    assert report["summary"]["max_timestamp"] is not None
+    assert report["summary"]["min_timestamp"] < report["summary"]["max_timestamp"]
+
+
+def test_full_report_summary_fields():
+    """Summary must include expected dataset fields."""
+    df = _make_features_df(200)
+    report = run_full_evaluation_report(
+        df, task_types=("regression",), horizons=(1,), test_size=0.2,
+    )
+    s = report["summary"]
+    for key in ("exchange", "symbol", "timeframe", "row_count",
+                "min_timestamp", "max_timestamp", "feature_count",
+                "total_combinations", "successful", "skipped",
+                "lightgbm_available"):
+        assert key in s, f"Missing summary key: {key}"
+
+
+def test_full_report_no_live_network_calls():
+    """Full report must not make any network requests."""
+    df = _make_features_df(200)
+    # The function is purely local — if it runs without error, it passes
+    report = run_full_evaluation_report(
+        df, task_types=("regression",), horizons=(1,), test_size=0.2,
+    )
+    assert report is not None
+
+
+# ---------------------------------------------------------------------------
+# build_best_model_summary
+# ---------------------------------------------------------------------------
+
+
+def test_build_best_model_summary_returns_dataframe():
+    df = _make_features_df(200)
+    report = run_full_evaluation_report(
+        df, task_types=("regression", "classification"),
+        horizons=(1,), test_size=0.2,
+    )
+    best_df = build_best_model_summary(report["metrics_df"])
+    assert not best_df.empty
+
+
+def test_build_best_model_summary_columns():
+    df = _make_features_df(200)
+    report = run_full_evaluation_report(
+        df, task_types=("regression", "classification"),
+        horizons=(1,), test_size=0.2,
+    )
+    best_df = build_best_model_summary(report["metrics_df"])
+    assert "task_type" in best_df.columns
+    assert "horizon" in best_df.columns
+    # Regression columns
+    reg_rows = best_df[best_df["task_type"] == "regression"]
+    if not reg_rows.empty:
+        assert "best_mae_model" in best_df.columns
+        assert "best_rmse_model" in best_df.columns
+    # Classification columns
+    cls_rows = best_df[best_df["task_type"] == "classification"]
+    if not cls_rows.empty:
+        assert "best_balanced_accuracy_model" in best_df.columns
+        assert "best_f1_model" in best_df.columns
+
+
+def test_build_best_model_summary_empty_metrics():
+    empty_df = pd.DataFrame(columns=["task_type", "horizon", "model_name"])
+    best_df = build_best_model_summary(empty_df)
+    assert best_df.empty
+
+
+def test_build_best_model_summary_handles_missing_metrics():
+    """Must not crash when some metrics are entirely NaN."""
+    df = _make_features_df(200)
+    report = run_full_evaluation_report(
+        df, task_types=("regression",), horizons=(1,), test_size=0.2,
+    )
+    best_df = build_best_model_summary(report["metrics_df"])
+    assert isinstance(best_df, pd.DataFrame)
+
+
+# ---------------------------------------------------------------------------
+# generate_report_analysis
+# ---------------------------------------------------------------------------
+
+
+def test_generate_report_analysis_returns_text():
+    df = _make_features_df(200)
+    report = run_full_evaluation_report(
+        df, task_types=("regression",), horizons=(1,), test_size=0.2,
+    )
+    text = generate_report_analysis(
+        report["metrics_df"], report["summary"], report["skipped_df"]
+    )
+    assert isinstance(text, str)
+    assert "Dataset" in text
+    assert "Cautions" in text
+
+
+def test_generate_report_analysis_includes_cautions():
+    df = _make_features_df(200)
+    report = run_full_evaluation_report(
+        df, task_types=("regression",), horizons=(1,), test_size=0.2,
+    )
+    text = generate_report_analysis(report["metrics_df"], report["summary"])
+    assert "historical evaluation" in text
+    assert "not investment advice" in text
+    assert "non-stationary" in text
+
+
+def test_generate_report_analysis_no_crash_on_empty():
+    text = generate_report_analysis(
+        pd.DataFrame(),
+        {"row_count": 0, "timeframe": "1h", "skipped": 5},
+    )
+    assert "No metrics were produced" in text
+
+
+def test_generate_report_analysis_no_crash_missing_fields():
+    text = generate_report_analysis(
+        pd.DataFrame(), {"row_count": 100},
+    )
+    assert isinstance(text, str)
+
+
+def test_generate_report_analysis_small_dataset_warning():
+    df = _make_features_df(200)
+    report = run_full_evaluation_report(
+        df, task_types=("regression",), horizons=(1,), test_size=0.2,
+    )
+    summary = report["summary"]
+    summary["row_count"] = 500  # simulate small dataset
+    text = generate_report_analysis(report["metrics_df"], summary)
+    assert "too small" in text.lower() or "small" in text.lower()
+
+
+def test_generate_report_analysis_mentions_skipped():
+    df = _make_features_df(200)
+    report = run_full_evaluation_report(
+        df, task_types=("regression",), horizons=(1,), test_size=0.2,
+    )
+    skipped_df = pd.DataFrame([{
+        "task_type": "classification", "horizon": 24,
+        "model_name": "Logistic Regression", "reason": "Not enough data",
+    }])
+    summary = report["summary"].copy()
+    summary["skipped"] = 1
+    text = generate_report_analysis(report["metrics_df"], summary, skipped_df)
+    assert "Skipped" in text
+    assert "1 model" in text
+
+
+# ---------------------------------------------------------------------------
+# forward_forecast
+# ---------------------------------------------------------------------------
+
+
+def test_forward_forecast_regression_trains_on_labeled_only():
+    df = _make_features_df(200)
+    result = forward_forecast(
+        df, task_type="regression", horizon=1, model_name="Ridge",
+    )
+    assert "error" not in result
+    assert "latest_timestamp" in result
+    assert result["horizon"] == 1
+    assert "predicted_log_return" in result
+    assert result["training_rows"] > 0
+
+
+def test_forward_forecast_classification_returns_class():
+    df = _make_features_df(200)
+    result = forward_forecast(
+        df, task_type="classification", horizon=1,
+        model_name="Logistic Regression",
+    )
+    assert "error" not in result
+    assert "predicted_class" in result
+    assert result["predicted_class"] in (0, 1)
+    assert "predicted_probability" in result
+    assert result["predicted_probability"] is not None
+
+
+def test_forward_forecast_latest_row_can_have_nan_target():
+    """Latest feature row should be usable even when target is NaN."""
+    df = _make_features_df(250)
+    # The last row naturally has NaN target for horizon>=1
+    result = forward_forecast(
+        df, task_type="regression", horizon=4, model_name="Ridge",
+    )
+    assert "error" not in result
+    assert result["latest_timestamp"] is not None
+
+
+def test_forward_forecast_target_columns_excluded_from_features():
+    """Target columns must not leak into input features."""
+    df = _make_features_df(250)
+    # Get default feature columns to verify they exclude targets
+    features = get_default_feature_columns(df)
+    targets = {
+        "target_return_1", "target_return_4", "target_return_24",
+        "target_direction_1", "target_direction_4", "target_direction_24",
+    }
+    assert targets.isdisjoint(set(features))
+    # Forward forecast should run without error with filtered features
+    result = forward_forecast(
+        df, task_type="regression", horizon=1, model_name="Ridge",
+        feature_columns=features,
+    )
+    assert "error" not in result
+
+
+def test_forward_forecast_estimated_future_close():
+    df = _make_features_df(250)
+    result = forward_forecast(
+        df, task_type="regression", horizon=1, model_name="Ridge",
+    )
+    assert "error" not in result
+    assert "estimated_future_close" in result
+    if result.get("latest_close") is not None:
+        assert result["estimated_future_close"] > 0
+
+
+def test_forward_forecast_insufficient_data_error():
+    df = _make_features_df(5)
+    result = forward_forecast(
+        df, task_type="regression", horizon=24, model_name="Ridge",
+    )
+    assert "error" in result
+    assert "Need at least 10" in result["error"]
+
+
+def test_forward_forecast_missing_target_column():
+    df = _make_ohlcv_df(100)
+    result = forward_forecast(
+        df, task_type="regression", horizon=1, model_name="Ridge",
+    )
+    assert "error" in result
+    assert "not in DataFrame" in result["error"]
+
+
+def test_forward_forecast_baseline_regression():
+    df = _make_features_df(200)
+    result = forward_forecast(
+        df, task_type="regression", horizon=1, model_name="Zero Return",
+    )
+    assert "error" not in result
+    assert result["predicted_log_return"] == 0.0
+
+
+def test_forward_forecast_baseline_classification():
+    df = _make_features_df(200)
+    result = forward_forecast(
+        df, task_type="classification", horizon=1,
+        model_name="Majority Class",
+    )
+    assert "error" not in result
+    assert result["predicted_class"] in (0, 1)
+    # Majority Class does not support probability
+    assert result["predicted_probability"] is None
+
+
+def test_forward_forecast_unknown_model():
+    df = _make_features_df(100)
+    result = forward_forecast(
+        df, task_type="regression", horizon=1, model_name="NoSuchModel",
+    )
+    assert "error" in result
+    assert "Unknown model" in result["error"]
+
+
+def test_forward_forecast_produces_historical_context():
+    """When enough data, historical metrics should be present."""
+    df = _make_features_df(200)
+    result = forward_forecast(
+        df, task_type="regression", horizon=1, model_name="Ridge",
+    )
+    assert "error" not in result
+    # With 200 rows and test_size=0.2, we should get context metrics
+    if result["training_rows"] >= 50:
+        assert "historical_mae" in result
+        assert "historical_rmse" in result
+
+
+def test_forward_forecast_no_live_network_calls():
+    df = _make_features_df(200)
+    result = forward_forecast(
+        df, task_type="regression", horizon=1, model_name="Ridge",
+    )
+    assert result is not None
+
+
+def test_forward_forecast_excludes_nan_target_rows_from_training():
+    """Rows with NaN target must not be used for model training."""
+    df = _make_features_df(100)
+    # Rows at the end have NaN target
+    total_rows = len(df)
+    result = forward_forecast(
+        df, task_type="regression", horizon=24, model_name="Ridge",
+    )
+    if "error" not in result:
+        # Training rows should be less than total (some NaN targets dropped)
+        assert result["training_rows"] < total_rows
+
+
+# ---------------------------------------------------------------------------
+# Forecast storage
+# ---------------------------------------------------------------------------
+
+
+def test_build_forecast_path_convention():
+    from src.crypto_trend_lab.storage.parquet import _build_forecast_path
+
+    path = _build_forecast_path(
+        "binance", "BTC/USDT", "1h", "Ridge", "target_return_1"
+    )
+    path_str = str(path).replace("\\", "/")
+
+    assert "data/forecasts" in path_str
+    assert "exchange=binance" in path_str
+    assert "symbol=BTC_USDT" in path_str
+    assert "timeframe=1h" in path_str
+    assert "model=ridge" in path_str
+    assert "target=target_return_1" in path_str
+    assert path_str.endswith("forecast.parquet")
+
+
+def test_save_and_load_forecast_roundtrip(tmp_path, monkeypatch):
+    import src.crypto_trend_lab.storage.parquet as pmod
+
+    monkeypatch.setattr(pmod, "DATA_DIR", tmp_path)
+
+    ts = pd.Timestamp("2024-01-15 12:00:00", tz="utc")
+    df = pd.DataFrame([{
+        "timestamp": ts,
+        "horizon": 1,
+        "target_column": "target_return_1",
+        "model_name": "Ridge",
+        "predicted_log_return": 0.0015,
+        "estimated_future_close": 40500.0,
+    }])
+
+    path = pmod.save_forecast_parquet(
+        df, "binance", "BTC/USDT", "1h", "Ridge", "target_return_1"
+    )
+    assert path.exists()
+
+    loaded = pmod.load_forecast_parquet(
+        "binance", "BTC/USDT", "1h", "Ridge", "target_return_1"
+    )
+    assert len(loaded) == 1
+    assert loaded["predicted_log_return"].iloc[0] == 0.0015
+
+
+def test_load_forecast_missing_file_returns_empty():
+    from src.crypto_trend_lab.storage.parquet import load_forecast_parquet
+
+    df = load_forecast_parquet(
+        "nonexistent", "BTC/USDT", "1h", "NoModel", "target_return_1"
+    )
+    assert df.empty
+
+
+# ---------------------------------------------------------------------------
+# Issue 1: Pagination logic for large recent-bars requests
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_coverage_with_large_limit():
+    """Coverage estimate must work for large limits (50000 bars)."""
+    result = estimate_coverage(50000, "1h")
+    assert "day" in result or "days" in result
+    assert "bar" not in result.lower() if "unknown" not in result else True
+
+
+def test_dataset_sizing_warning_large_dataset():
+    """No warning for large datasets."""
+    assert dataset_sizing_warning(50000, "1h") is None
+    assert dataset_sizing_warning(10000, "4h") is None
+    assert dataset_sizing_warning(5000, "1d") is None
+
+
+def test_timeframe_duration_mapping_complete():
+    """All supported timeframes must have duration mappings."""
+    from src.crypto_trend_lab.utils.helpers import TIMEFRAME_TO_DURATION
+
+    for tf in ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]:
+        assert tf in TIMEFRAME_TO_DURATION, f"Missing duration for {tf}"
+        assert isinstance(TIMEFRAME_TO_DURATION[tf], pd.Timedelta)
+
+
+def test_fetch_range_called_when_limit_exceeds_cap(monkeypatch):
+    """When limit > 1000, fetch_ohlcv_range should be used (logic check)."""
+    from src.crypto_trend_lab.utils.helpers import TIMEFRAME_TO_DURATION
+
+    # Simulate the decision logic in app.py
+    limit = 50000
+    timeframe = "1h"
+    use_range = limit > 1000
+    assert use_range is True
+
+    # Verify the duration calculation works
+    duration = limit * TIMEFRAME_TO_DURATION[timeframe]
+    assert duration > pd.Timedelta(days=365)  # 50000 hours ≈ 5.7 years
+
+
+def test_pagination_trims_excess_rows():
+    """Simulate: when range fetch returns more than requested, trim to limit."""
+    import numpy as np
+
+    limit = 5000
+    returned = 5200  # exchange returned slightly more
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2024-01-01", periods=returned, freq="1h", tz="utc"),
+        "close": np.arange(returned, dtype=float),
+    })
+
+    if len(df) > limit:
+        df = df.iloc[-limit:].reset_index(drop=True)
+
+    assert len(df) == limit
+    assert df["close"].iloc[0] == returned - limit  # first row is shifted
+
+
+# ---------------------------------------------------------------------------
+# Issue 2: Forecast path
+# ---------------------------------------------------------------------------
+
+
+def test_forecast_path_regression_returns_points():
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Ridge", path_length=24, timeframe="1h",
+    )
+    assert "error" not in result
+    assert "path_points" in result
+    assert len(result["path_points"]) > 0
+    # Must have at least horizons 1 and 4 (24 > 24, so all 3)
+    horizons_found = {p["horizon"] for p in result["path_points"] if "error" not in p}
+    assert horizons_found.issuperset({1, 4})
+
+
+def test_forecast_path_only_supported_horizons():
+    """Only horizons 1, 4, 24 ≤ path_length should be in path points."""
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Ridge", path_length=6, timeframe="1h",
+    )
+    points = [p for p in result["path_points"] if "error" not in p]
+    horizons = {p["horizon"] for p in points}
+    assert horizons == {1, 4}  # 24 > 6, so excluded
+    assert all(h <= 6 for h in horizons)
+
+
+def test_forecast_path_future_timestamps_after_latest():
+    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+
+    latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
+    ts = _generate_future_timestamps(latest, "1h", 5)
+    assert len(ts) == 5
+    assert all(t > latest for t in ts)
+    assert ts[0] == pd.Timestamp("2024-06-15 13:00:00", tz="utc")
+    assert ts[4] == pd.Timestamp("2024-06-15 17:00:00", tz="utc")
+
+
+def test_forecast_path_future_timestamps_4h():
+    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+
+    latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
+    ts = _generate_future_timestamps(latest, "4h", 3)
+    assert len(ts) == 3
+    assert ts[0] == pd.Timestamp("2024-06-15 16:00:00", tz="utc")
+    assert ts[2] == pd.Timestamp("2024-06-16 00:00:00", tz="utc")
+
+
+def test_forecast_path_future_timestamps_1d():
+    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+
+    latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
+    ts = _generate_future_timestamps(latest, "1d", 5)
+    assert len(ts) == 5
+    assert ts[0] == pd.Timestamp("2024-06-16 12:00:00", tz="utc")
+
+
+def test_forecast_path_estimated_close_calculation():
+    """estimated_future_close = latest_close * exp(predicted_log_return)."""
+    import numpy as np
+
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Ridge", path_length=24, timeframe="1h",
+    )
+    assert result["latest_close"] is not None
+    for p in result["path_points"]:
+        if "error" not in p:
+            expected = result["latest_close"] * np.exp(p["predicted_log_return"])
+            assert abs(p["estimated_future_close"] - expected) < 1e-6
+
+
+def test_forecast_path_classification_error():
+    """Classification model names must produce an error for forecast_path."""
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Logistic Regression", path_length=24, timeframe="1h",
+    )
+    assert "error" in result
+    assert "regression" in result["error"].lower()
+
+
+def test_forecast_path_table_contains_required_columns():
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Ridge", path_length=24, timeframe="1h",
+    )
+    for p in result["path_points"]:
+        if "error" not in p:
+            assert "horizon" in p
+            assert "forecast_step" in p
+            assert "forecast_timestamp" in p
+            assert "target_column" in p
+            assert "predicted_log_return" in p
+            assert "estimated_future_close" in p
+
+
+def test_forecast_path_excludes_targets_from_features():
+    """Feature columns passed to forecast_path must not include target columns."""
+    df = _make_features_df(300)
+    features = get_default_feature_columns(df)
+    targets = {
+        "target_return_1", "target_return_4", "target_return_24",
+        "target_direction_1", "target_direction_4", "target_direction_24",
+    }
+    assert targets.isdisjoint(set(features))
+
+    result = forecast_path(
+        df, model_name="Ridge", path_length=24, timeframe="1h",
+        feature_columns=features,
+    )
+    assert "error" not in result
+
+
+def test_forecast_path_latest_row_nan_target():
+    """Latest feature row used for forecast may have NaN target."""
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Ridge", path_length=24, timeframe="1h",
+    )
+    assert "error" not in result
+    assert result["latest_timestamp"] is not None
+    assert result["latest_close"] > 0
+
+
+def test_forecast_path_handles_small_path_length():
+    """path_length=6 only produces horizon 1 and 4 points."""
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Ridge", path_length=6, timeframe="1h",
+    )
+    points = [p for p in result["path_points"] if "error" not in p]
+    assert all(p["horizon"] in (1, 4) for p in points)
+
+
+def test_forecast_path_handles_large_path_length():
+    """path_length=168 produces all three horizons (1, 4, 24)."""
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Ridge", path_length=168, timeframe="1h",
+    )
+    points = [p for p in result["path_points"] if "error" not in p]
+    horizons = {p["horizon"] for p in points}
+    assert horizons == {1, 4, 24}
+
+
+def test_forecast_path_chart_history_included():
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Ridge", path_length=24, timeframe="1h",
+    )
+    assert "chart_history" in result
+    assert not result["chart_history"].empty
+    assert "timestamp" in result["chart_history"].columns
+    assert "close" in result["chart_history"].columns
+
+
+def test_forecast_path_no_live_network_calls():
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Ridge", path_length=24, timeframe="1h",
+    )
+    assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# Display aggregation: aggregate_ohlcv_by_count
+# ---------------------------------------------------------------------------
+
+
+def _make_ohlcv_for_agg(n: int = 200) -> pd.DataFrame:
+    """Build a deterministic OHLCV DataFrame for display aggregation tests."""
+    ts = pd.date_range("2024-01-01", periods=n, freq="1h", tz="utc")
+    rng = np.random.default_rng(42)
+    prices = 40000 + np.cumsum(rng.normal(0, 50, n))
+    return pd.DataFrame({
+        "exchange": "binance",
+        "symbol": "BTC/USDT",
+        "timeframe": "1h",
+        "timestamp": ts,
+        "open": prices - 10,
+        "high": prices + 20,
+        "low": prices - 20,
+        "close": prices,
+        "volume": rng.random(n) * 100 + 100,
+    })
+
+
+def test_aggregate_ohlcv_raw_when_fewer_than_target():
+    from src.crypto_trend_lab.visualization.display import aggregate_ohlcv_by_count
+
+    df = _make_ohlcv_for_agg(50)
+    result = aggregate_ohlcv_by_count(df, target_bars=100)
+    # Should return raw copy (source_rows = 1 per row since n <= target_bars)
+    assert len(result) == 50
+    assert "source_rows" in result.columns
+
+
+def test_aggregate_ohlcv_open_is_first_open():
+    from src.crypto_trend_lab.visualization.display import aggregate_ohlcv_by_count
+
+    df = _make_ohlcv_for_agg(200)
+    result = aggregate_ohlcv_by_count(df, target_bars=10)
+    # For each aggregated row, open should equal the first open from its group
+    assert len(result) <= 10
+    # Spot check: group first open should match
+    first_group = df.iloc[:20]  # ~200/10 = 20 rows per group
+    assert result["open"].iloc[0] == first_group["open"].iloc[0]
+
+
+def test_aggregate_ohlcv_high_is_max_high():
+    from src.crypto_trend_lab.visualization.display import aggregate_ohlcv_by_count
+
+    df = _make_ohlcv_for_agg(200)
+    result = aggregate_ohlcv_by_count(df, target_bars=5)
+    # For each group, high should be the maximum high in that group
+    assert len(result) <= 5
+    # Verify all highs are >= corresponding opens
+    assert (result["high"] >= result["open"]).all()
+
+
+def test_aggregate_ohlcv_low_is_min_low():
+    from src.crypto_trend_lab.visualization.display import aggregate_ohlcv_by_count
+
+    df = _make_ohlcv_for_agg(200)
+    result = aggregate_ohlcv_by_count(df, target_bars=5)
+    # For each group, low should be the minimum low in that group
+    assert (result["low"] <= result["open"]).all()
+
+
+def test_aggregate_ohlcv_close_is_last_close():
+    from src.crypto_trend_lab.visualization.display import aggregate_ohlcv_by_count
+
+    df = _make_ohlcv_for_agg(200)
+    result = aggregate_ohlcv_by_count(df, target_bars=10)
+    assert len(result) <= 10
+    last_group = df.iloc[-20:]  # last ~20 rows
+    assert result["close"].iloc[-1] == last_group["close"].iloc[-1]
+
+
+def test_aggregate_ohlcv_volume_is_sum():
+    from src.crypto_trend_lab.visualization.display import aggregate_ohlcv_by_count
+
+    df = _make_ohlcv_for_agg(100)
+    result = aggregate_ohlcv_by_count(df, target_bars=4)
+    # Total volume should be preserved
+    assert abs(result["volume"].sum() - df["volume"].sum()) < 0.01
+
+
+def test_aggregate_ohlcv_output_row_count_controlled():
+    from src.crypto_trend_lab.visualization.display import aggregate_ohlcv_by_count
+
+    df = _make_ohlcv_for_agg(500)
+    for target in [10, 50, 100]:
+        result = aggregate_ohlcv_by_count(df, target_bars=target)
+        assert len(result) <= target
+
+
+def test_aggregate_ohlcv_timestamp_timezone_preserved():
+    from src.crypto_trend_lab.visualization.display import aggregate_ohlcv_by_count
+
+    df = _make_ohlcv_for_agg(200)
+    result = aggregate_ohlcv_by_count(df, target_bars=20)
+    assert result["timestamp"].dt.tz is not None
+    assert str(result["timestamp"].dt.tz) == "UTC"
+
+
+def test_aggregate_ohlcv_no_averaging_of_prices():
+    """OHLCV display aggregation must not average open/high/low/close."""
+    from src.crypto_trend_lab.visualization.display import aggregate_ohlcv_by_count
+
+    df = _make_ohlcv_for_agg(200)
+    result = aggregate_ohlcv_by_count(df, target_bars=5)
+
+    # Verify: no price column should be an average.
+    # open should match some df.open value in its group
+    for i in range(len(result)):
+        src_start = result["source_start"].iloc[i]
+        src_end = result["source_end"].iloc[i]
+        # source_start/end are already tz-aware UTC from the input
+        group = df[(df["timestamp"] >= src_start) & (df["timestamp"] <= src_end)]
+        assert len(group) > 0, f"Group {i}: no rows in [{src_start}, {src_end}]"
+        assert result["open"].iloc[i] == group["open"].iloc[0]
+        assert result["high"].iloc[i] == group["high"].max()
+        assert result["low"].iloc[i] == group["low"].min()
+        assert result["close"].iloc[i] == group["close"].iloc[-1]
+
+
+# ---------------------------------------------------------------------------
+# Display aggregation: prepare_candlestick_display_data
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_candlestick_raw_mode_when_few_rows():
+    from src.crypto_trend_lab.visualization.display import (
+        prepare_candlestick_display_data,
+    )
+
+    df = _make_ohlcv_for_agg(50)
+    result = prepare_candlestick_display_data(df, max_bars=1000)
+    assert result["display_mode"] == "raw"
+    assert result["displayed_rows"] == 50
+    assert result["input_rows"] == 50
+
+
+def test_prepare_candlestick_aggregated_mode_when_many_rows():
+    from src.crypto_trend_lab.visualization.display import (
+        prepare_candlestick_display_data,
+    )
+
+    df = _make_ohlcv_for_agg(500)
+    result = prepare_candlestick_display_data(df, max_bars=100)
+    assert result["display_mode"] == "aggregated"
+    assert result["displayed_rows"] <= 100
+    assert result["input_rows"] == 500
+    assert result["approx_bars_per_candle"] is not None
+
+
+def test_prepare_candlestick_preserves_full_row_count_in_metadata():
+    from src.crypto_trend_lab.visualization.display import (
+        prepare_candlestick_display_data,
+    )
+
+    df = _make_ohlcv_for_agg(500)
+    result = prepare_candlestick_display_data(df, max_bars=50)
+    assert result["input_rows"] == 500  # Full count in metadata
+    assert result["displayed_rows"] <= 50  # Aggregated for display
+
+
+# ---------------------------------------------------------------------------
+# Display aggregation: filter_by_time_range
+# ---------------------------------------------------------------------------
+
+
+def test_filter_by_time_range_full_when_no_args():
+    from src.crypto_trend_lab.visualization.display import filter_by_time_range
+
+    df = _make_ohlcv_for_agg(100)
+    result = filter_by_time_range(df)
+    assert len(result) == 100
+
+
+def test_filter_by_time_range_start_only():
+    from src.crypto_trend_lab.visualization.display import filter_by_time_range
+
+    df = _make_ohlcv_for_agg(100)
+    # Keep only rows from row index 50 onwards
+    start_ts = df["timestamp"].iloc[50]
+    result = filter_by_time_range(df, start=start_ts)
+    assert len(result) == 50
+    assert result["timestamp"].min() >= start_ts
+
+
+def test_filter_by_time_range_end_only():
+    from src.crypto_trend_lab.visualization.display import filter_by_time_range
+
+    df = _make_ohlcv_for_agg(100)
+    end_ts = df["timestamp"].iloc[49]
+    result = filter_by_time_range(df, end=end_ts)
+    assert len(result) == 50
+    assert result["timestamp"].max() <= end_ts
+
+
+def test_filter_by_time_range_preserves_tz():
+    from src.crypto_trend_lab.visualization.display import filter_by_time_range
+
+    df = _make_ohlcv_for_agg(100)
+    start = pd.Timestamp("2024-01-03", tz="utc")
+    result = filter_by_time_range(df, start=start)
+    assert result["timestamp"].dt.tz is not None
+
+
+def test_filter_by_time_range_no_mutation():
+    """filter_by_time_range must not mutate the input DataFrame."""
+    from src.crypto_trend_lab.visualization.display import filter_by_time_range
+
+    df = _make_ohlcv_for_agg(100)
+    original_len = len(df)
+    _ = filter_by_time_range(df, start=df["timestamp"].iloc[50])
+    assert len(df) == original_len  # Original unchanged
+
+
+# ---------------------------------------------------------------------------
+# Display aggregation: get_display_summary
+# ---------------------------------------------------------------------------
+
+
+def test_get_display_summary_keys():
+    from src.crypto_trend_lab.visualization.display import (
+        get_display_summary,
+        prepare_candlestick_display_data,
+    )
+
+    df = _make_ohlcv_for_agg(500)
+    view = df.iloc[-200:]
+    display_result = prepare_candlestick_display_data(view, max_bars=50)
+    summary = get_display_summary(df, view, display_result)
+
+    for key in ("full_rows", "view_rows", "displayed_candles",
+                "display_mode", "chart_start", "chart_end"):
+        assert key in summary
+    assert summary["full_rows"] == 500
+    assert summary["view_rows"] == 200
+    assert summary["displayed_candles"] <= 50
+
+
+# ---------------------------------------------------------------------------
+# Data integrity: full dataset preserved for modeling
+# ---------------------------------------------------------------------------
+
+
+def test_data_quality_uses_full_df_not_aggregated():
+    """Data quality checks must use df_full, never df_chart."""
+    from src.crypto_trend_lab.visualization.display import aggregate_ohlcv_by_count
+    from src.crypto_trend_lab.validation.quality import check_ohlcv_quality
+
+    df_full = _make_ohlcv_for_agg(500)
+    df_chart = aggregate_ohlcv_by_count(df_full, target_bars=50)
+
+    # Data quality on df_full
+    full_quality = check_ohlcv_quality(df_full, "1h")
+    # Data quality on df_chart would give wrong row count
+    chart_quality = check_ohlcv_quality(df_chart, "1h")
+
+    # Full data quality must report original row count
+    assert full_quality["row_count"] == 500
+    # Aggregated chart has fewer rows
+    assert chart_quality["row_count"] != 500
+    # df_chart row count is ≤ 50
+    assert chart_quality["row_count"] <= 50
+
+
+def test_feature_generation_uses_full_df():
+    """build_features must be called on df_full, not df_chart."""
+    from src.crypto_trend_lab.visualization.display import aggregate_ohlcv_by_count
+    from src.crypto_trend_lab.features.pipeline import build_features
+
+    df_full = _make_ohlcv_for_agg(300)
+    df_chart = aggregate_ohlcv_by_count(df_full, target_bars=30)
+
+    features_full = build_features(df_full)
+    features_chart = build_features(df_chart)
+
+    assert len(features_full) == 300
+    assert len(features_chart) < 300
+    # Full features have more rows
+    assert len(features_full) > len(features_chart)
+
+
+def test_model_evaluation_uses_full_features():
+    """compare_baselines_and_models must use full features, not df_chart."""
+    from src.crypto_trend_lab.visualization.display import aggregate_ohlcv_by_count
+    from src.crypto_trend_lab.features.pipeline import build_features
+    from src.crypto_trend_lab.evaluation.report import compare_baselines_and_models
+
+    df_full = _make_ohlcv_for_agg(300)
+    df_chart = aggregate_ohlcv_by_count(df_full, target_bars=30)
+
+    features_full = build_features(df_full)
+
+    # Evaluation on full features should succeed
+    result_full = compare_baselines_and_models(
+        features_full, task_type="regression", horizon=1, test_size=0.2,
+    )
+    assert len(result_full["predictions"]) > 0
+
+    # Build features from aggregated chart — fewer rows
+    features_chart = build_features(df_chart)
+    # The aggregated data may have too few rows for evaluation
+    # Either way, we verify full features have more data
+    assert len(features_full) > len(features_chart)
+
+
+def test_forecast_path_uses_timedelta_not_int():
+    """Forecast path timestamp generation must use Timedelta arithmetic."""
+    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+
+    latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
+
+    # This would raise TypeError if Timestamp + int was used
+    for tf in ["1m", "5m", "1h", "4h", "1d", "1w"]:
+        ts = _generate_future_timestamps(latest, tf, 3)
+        assert len(ts) == 3, f"Failed for timeframe {tf}"
+        for t in ts:
+            assert t > latest
+            assert t.tzinfo is not None

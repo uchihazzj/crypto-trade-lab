@@ -7,6 +7,8 @@ import pytest
 
 from src.crypto_trend_lab.utils.helpers import (
     OHLCV_COLUMNS,
+    dataset_sizing_warning,
+    estimate_coverage,
     symbol_to_safe,
     timeframe_to_freq,
     validate_ohlcv_schema,
@@ -350,3 +352,259 @@ def _make_ohlcv(timestamps: pd.DatetimeIndex | list) -> pd.DataFrame:
             "volume": [1000.0 + i for i in range(n)],
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Coverage estimation
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_coverage_1h():
+    result = estimate_coverage(100, "1h")
+    assert "4 day" in result
+    assert "4 hours" in result
+
+
+def test_estimate_coverage_1d():
+    result = estimate_coverage(30, "1d")
+    assert "30 day" in result
+
+
+def test_estimate_coverage_1m():
+    result = estimate_coverage(60, "1m")
+    assert "1 hour" in result
+
+
+def test_estimate_coverage_4h():
+    result = estimate_coverage(42, "4h")
+    assert "7 day" in result
+
+
+def test_estimate_coverage_1w():
+    result = estimate_coverage(4, "1w")
+    assert "28 day" in result
+
+
+def test_estimate_coverage_singular():
+    result = estimate_coverage(1, "1d")
+    assert "1 day" in result
+    assert "days" not in result
+
+
+def test_estimate_coverage_zero():
+    result = estimate_coverage(0, "1h")
+    assert "< 1 minute" in result
+
+
+def test_estimate_coverage_unknown_timeframe():
+    result = estimate_coverage(100, "2x")
+    assert "unknown timeframe" in result
+    assert "100 bars" in result
+
+
+def test_dataset_sizing_warning_adequate():
+    assert dataset_sizing_warning(5000, "1h") is None
+    assert dataset_sizing_warning(2000, "4h") is None
+    assert dataset_sizing_warning(2000, "1d") is None
+
+
+def test_dataset_sizing_warning_ui_only():
+    result = dataset_sizing_warning(500, "1h")
+    assert result is not None
+    assert "UI testing" in result
+
+
+def test_dataset_sizing_warning_1h_weak():
+    result = dataset_sizing_warning(1500, "1h")
+    assert result is not None
+    assert "Weak for model evaluation" in result
+
+
+def test_dataset_sizing_warning_4h_at_1500_adequate():
+    """1500 rows of 4h exceeds the < 1000 check and 4h has no extra weak band."""
+    result = dataset_sizing_warning(1500, "4h")
+    assert result is None
+
+
+def test_dataset_sizing_warning_1d_under_1000_ui_only():
+    """< 1000 rows for 1d triggers the general UI-testing warning first."""
+    result = dataset_sizing_warning(500, "1d")
+    assert result is not None
+    assert "UI testing" in result
+
+
+def test_dataset_sizing_warning_1m_no_modeling_warning():
+    """1m timeframe is not in the weak-for-modeling check list."""
+    # 500 bars is below 1000 → UI testing warning triggers first anyway
+    result = dataset_sizing_warning(1500, "1m")
+    assert result is None  # 1500 > 1000 and 1m not checked for higher threshold
+
+
+# ---------------------------------------------------------------------------
+# timeframe_to_timedelta
+# ---------------------------------------------------------------------------
+
+
+def test_timeframe_to_timedelta_1m():
+    from src.crypto_trend_lab.utils.helpers import timeframe_to_timedelta
+
+    td = timeframe_to_timedelta("1m")
+    assert td == pd.Timedelta(minutes=1)
+
+
+def test_timeframe_to_timedelta_3m():
+    from src.crypto_trend_lab.utils.helpers import timeframe_to_timedelta
+
+    td = timeframe_to_timedelta("3m")
+    assert td == pd.Timedelta(minutes=3)
+
+
+def test_timeframe_to_timedelta_5m():
+    from src.crypto_trend_lab.utils.helpers import timeframe_to_timedelta
+
+    td = timeframe_to_timedelta("5m")
+    assert td == pd.Timedelta(minutes=5)
+
+
+def test_timeframe_to_timedelta_1h():
+    from src.crypto_trend_lab.utils.helpers import timeframe_to_timedelta
+
+    td = timeframe_to_timedelta("1h")
+    assert td == pd.Timedelta(hours=1)
+
+
+def test_timeframe_to_timedelta_2h():
+    from src.crypto_trend_lab.utils.helpers import timeframe_to_timedelta
+
+    td = timeframe_to_timedelta("2h")
+    assert td == pd.Timedelta(hours=2)
+
+
+def test_timeframe_to_timedelta_4h():
+    from src.crypto_trend_lab.utils.helpers import timeframe_to_timedelta
+
+    td = timeframe_to_timedelta("4h")
+    assert td == pd.Timedelta(hours=4)
+
+
+def test_timeframe_to_timedelta_6h():
+    from src.crypto_trend_lab.utils.helpers import timeframe_to_timedelta
+
+    td = timeframe_to_timedelta("6h")
+    assert td == pd.Timedelta(hours=6)
+
+
+def test_timeframe_to_timedelta_8h():
+    from src.crypto_trend_lab.utils.helpers import timeframe_to_timedelta
+
+    td = timeframe_to_timedelta("8h")
+    assert td == pd.Timedelta(hours=8)
+
+
+def test_timeframe_to_timedelta_12h():
+    from src.crypto_trend_lab.utils.helpers import timeframe_to_timedelta
+
+    td = timeframe_to_timedelta("12h")
+    assert td == pd.Timedelta(hours=12)
+
+
+def test_timeframe_to_timedelta_1d():
+    from src.crypto_trend_lab.utils.helpers import timeframe_to_timedelta
+
+    td = timeframe_to_timedelta("1d")
+    assert td == pd.Timedelta(days=1)
+
+
+def test_timeframe_to_timedelta_1w():
+    from src.crypto_trend_lab.utils.helpers import timeframe_to_timedelta
+
+    td = timeframe_to_timedelta("1w")
+    assert td == pd.Timedelta(weeks=1)
+
+
+def test_timeframe_to_timedelta_unknown_raises():
+    from src.crypto_trend_lab.utils.helpers import timeframe_to_timedelta
+
+    with pytest.raises(KeyError, match="Unsupported timeframe"):
+        timeframe_to_timedelta("2x")
+
+
+# ---------------------------------------------------------------------------
+# _generate_future_timestamps
+# ---------------------------------------------------------------------------
+
+
+def test_future_timestamps_1h_correct_delta():
+    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+
+    latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
+    ts = _generate_future_timestamps(latest, "1h", 4)
+
+    assert len(ts) == 4
+    assert ts[0] == pd.Timestamp("2024-06-15 13:00:00", tz="utc")
+    assert ts[1] == pd.Timestamp("2024-06-15 14:00:00", tz="utc")
+    assert ts[2] == pd.Timestamp("2024-06-15 15:00:00", tz="utc")
+    assert ts[3] == pd.Timestamp("2024-06-15 16:00:00", tz="utc")
+
+
+def test_future_timestamps_4h_correct_delta():
+    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+
+    latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
+    ts = _generate_future_timestamps(latest, "4h", 3)
+
+    assert len(ts) == 3
+    assert ts[0] == pd.Timestamp("2024-06-15 16:00:00", tz="utc")
+    assert ts[1] == pd.Timestamp("2024-06-15 20:00:00", tz="utc")
+    assert ts[2] == pd.Timestamp("2024-06-16 00:00:00", tz="utc")
+
+
+def test_future_timestamps_1d_correct_delta():
+    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+
+    latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
+    ts = _generate_future_timestamps(latest, "1d", 5)
+
+    assert len(ts) == 5
+    assert ts[0] == pd.Timestamp("2024-06-16 12:00:00", tz="utc")
+    assert ts[4] == pd.Timestamp("2024-06-20 12:00:00", tz="utc")
+
+
+def test_future_timestamps_preserve_utc():
+    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+
+    latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
+    ts = _generate_future_timestamps(latest, "1h", 3)
+
+    for t in ts:
+        assert t.tzinfo is not None
+        assert str(t.tzinfo) == "UTC"
+
+
+def test_future_timestamps_no_timestamp_plus_int_error():
+    """_generate_future_timestamps must use Timedelta, not int, for addition."""
+    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+
+    latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
+    # Must not raise: TypeError: Addition/subtraction of integers and
+    # integer-arrays with Timestamp is no longer supported.
+    ts = _generate_future_timestamps(latest, "4h", 24)
+    assert len(ts) == 24
+
+
+def test_future_timestamps_24_steps_1h():
+    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+
+    latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
+    ts = _generate_future_timestamps(latest, "1h", 24)
+
+    assert len(ts) == 24
+    assert ts[23] == pd.Timestamp("2024-06-16 12:00:00", tz="utc")
+
+
+def test_future_timestamps_unsupported_timeframe():
+    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+
+    latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
+    ts = _generate_future_timestamps(latest, "2x", 5)
+    assert ts == []

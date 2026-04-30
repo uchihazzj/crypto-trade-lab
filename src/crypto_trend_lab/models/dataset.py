@@ -100,6 +100,6 @@ def prepare_modeling_data(
 
     X = subset[features].to_numpy(dtype=float)
     y = subset[target_column].to_numpy(dtype=float)
-    timestamps = df.loc[subset.index, "timestamp"]
+    timestamps = df.loc[subset.index, "timestamp"].reset_index(drop=True)
 
     return X, y, timestamps, features

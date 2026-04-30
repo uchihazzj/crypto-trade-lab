@@ -170,8 +170,10 @@ def compare_baselines_and_models(
             f"Need at least 2 rows for train/test split."
         )
 
-    # Build temporary DataFrame for chronological split
-    full = pd.DataFrame({"timestamp": timestamps}, index=range(len(X)))
+    # Build temporary DataFrame for chronological split.
+    # Use .to_numpy() to avoid index-alignment issues if timestamps
+    # has a non-sequential index.
+    full = pd.DataFrame({"timestamp": timestamps.to_numpy()})
     full["_x_idx"] = range(len(X))
 
     train_df, test_df = chronological_train_test_split(
@@ -183,7 +185,11 @@ def compare_baselines_and_models(
 
     X_train, y_train = X[train_idx], y[train_idx]
     X_test, y_test = X[test_idx], y[test_idx]
-    test_timestamps = timestamps.iloc[test_idx].values
+
+    # Use the sorted train_df/test_df timestamps directly for dates
+    train_ts = train_df["timestamp"]
+    test_ts = test_df["timestamp"]
+    test_timestamps = test_ts.values
 
     # Run baselines
     results = []
@@ -226,12 +232,12 @@ def compare_baselines_and_models(
         "target_column": target_column,
         "feature_columns": features,
         "train_dates": {
-            "start": timestamps.iloc[train_idx[0]],
-            "end": timestamps.iloc[train_idx[-1]],
+            "start": train_ts.min(),
+            "end": train_ts.max(),
         },
         "test_dates": {
-            "start": timestamps.iloc[test_idx[0]],
-            "end": timestamps.iloc[test_idx[-1]],
+            "start": test_ts.min(),
+            "end": test_ts.max(),
         },
         "metrics_table": metrics_table,
         "predictions": pd.concat(predictions_list, ignore_index=True),
