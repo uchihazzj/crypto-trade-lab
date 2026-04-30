@@ -240,6 +240,7 @@ in backtests does not guarantee future results.
 - [x] Forecast path: sparse direct-horizon chart with actual OHLCV + predicted close.
 - [x] Forecast Parquet storage with deterministic paths.
 - [x] Forecast Path Chart timestamp generation fix (Timedelta arithmetic, expanded timeframe mapping).
+- [x] Dense direct-horizon forecast path (one independent model per step).
 - [x] OHLCV display aggregation (preserves OHLCV semantics, no random sampling, no averaging).
 - [x] Chart time range controls and max candles selector.
 - [x] Full dataset protection: df_chart/df_preview are rendering-only, never used for modeling.
@@ -315,24 +316,45 @@ The single-point forecast:
 ### Forward Forecast — Forecast Path
 
 The forecast path produces a visual chart of actual OHLCV candles (left)
-and predicted future close-price points (right):
+and predicted future close-price points (right). Two modes are available:
 
-- **Method**: Sparse direct-horizon forecast using supported regression
-  targets: `target_return_1`, `target_return_4`, `target_return_24`.
+#### Sparse Direct-Horizon Path
+
+- **Method**: Predicts only supported regression targets:
+  `target_return_1`, `target_return_4`, `target_return_24`.
 - **Path length**: user-selectable (6, 12, 24, 48, 72, 168 bars).
 - Only horizons ≤ path_length are included in the forecast.
+- Intermediate points between predicted horizons are connected by
+  interpolation for visualization — clearly labeled as such.
+- Good for a quick overview with minimal computation.
+
+#### Dense Direct-Horizon Path
+
+- **Method**: Trains one independent regression model per future step
+  (1..path_length). Each model is a direct-horizon predictor — no predicted
+  values are used as inputs for later steps.
+- **Path length**: user-selectable (6, 12, 24, 48, 72 bars).
+- Produces one forecast point per bar — no interpolation needed.
+- **Performance**: Training *N* models takes *N* times longer than a single
+  model. Large path lengths (48+) may be slow.
+- Failed horizons are logged in a skip table without crashing the full path.
+
+#### Common Details
+
 - Predicted future close at horizon *h*: `latest_close × exp(predicted_log_return_h)`.
 - The future line starts from the latest observed close.
 - A vertical marker separates observed data from the forecast.
-- Intermediate points between predicted horizons are connected by
-  interpolation for visualization — clearly labeled as such.
 - Classification does not produce a close-price forecast path.
-
-**Limitations**:
-- Only 3 sparse horizons are directly predicted (1, 4, 24).
+- Dense direct-horizon is **not recursive forecasting** and **not a sequence
+  model** — each horizon model is fitted independently.
 - Technical features are fixed at their latest observed values for all
   forecast steps — no feature dynamics are modeled.
+- Only close-price estimates are drawn. Future OHLCV candles are never generated.
+
+**Limitations**:
 - The forecast path is model-estimated and may be unstable with small datasets.
+- Linear models (Ridge) may produce near-zero return forecasts, resulting in a
+  nearly flat path.
 - This is NOT a trading signal or investment advice.
 
 ### Forecast Storage

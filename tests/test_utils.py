@@ -530,15 +530,15 @@ def test_timeframe_to_timedelta_unknown_raises():
 
 
 # ---------------------------------------------------------------------------
-# _generate_future_timestamps
+# generate_future_timestamps
 # ---------------------------------------------------------------------------
 
 
 def test_future_timestamps_1h_correct_delta():
-    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+    from src.crypto_trend_lab.evaluation.forecast import generate_future_timestamps
 
     latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
-    ts = _generate_future_timestamps(latest, "1h", 4)
+    ts = generate_future_timestamps(latest, "1h", 4)
 
     assert len(ts) == 4
     assert ts[0] == pd.Timestamp("2024-06-15 13:00:00", tz="utc")
@@ -548,10 +548,10 @@ def test_future_timestamps_1h_correct_delta():
 
 
 def test_future_timestamps_4h_correct_delta():
-    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+    from src.crypto_trend_lab.evaluation.forecast import generate_future_timestamps
 
     latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
-    ts = _generate_future_timestamps(latest, "4h", 3)
+    ts = generate_future_timestamps(latest, "4h", 3)
 
     assert len(ts) == 3
     assert ts[0] == pd.Timestamp("2024-06-15 16:00:00", tz="utc")
@@ -560,10 +560,10 @@ def test_future_timestamps_4h_correct_delta():
 
 
 def test_future_timestamps_1d_correct_delta():
-    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+    from src.crypto_trend_lab.evaluation.forecast import generate_future_timestamps
 
     latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
-    ts = _generate_future_timestamps(latest, "1d", 5)
+    ts = generate_future_timestamps(latest, "1d", 5)
 
     assert len(ts) == 5
     assert ts[0] == pd.Timestamp("2024-06-16 12:00:00", tz="utc")
@@ -571,10 +571,10 @@ def test_future_timestamps_1d_correct_delta():
 
 
 def test_future_timestamps_preserve_utc():
-    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+    from src.crypto_trend_lab.evaluation.forecast import generate_future_timestamps
 
     latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
-    ts = _generate_future_timestamps(latest, "1h", 3)
+    ts = generate_future_timestamps(latest, "1h", 3)
 
     for t in ts:
         assert t.tzinfo is not None
@@ -582,29 +582,29 @@ def test_future_timestamps_preserve_utc():
 
 
 def test_future_timestamps_no_timestamp_plus_int_error():
-    """_generate_future_timestamps must use Timedelta, not int, for addition."""
-    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+    """generate_future_timestamps must use Timedelta, not int, for addition."""
+    from src.crypto_trend_lab.evaluation.forecast import generate_future_timestamps
 
     latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
     # Must not raise: TypeError: Addition/subtraction of integers and
     # integer-arrays with Timestamp is no longer supported.
-    ts = _generate_future_timestamps(latest, "4h", 24)
+    ts = generate_future_timestamps(latest, "4h", 24)
     assert len(ts) == 24
 
 
 def test_future_timestamps_24_steps_1h():
-    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+    from src.crypto_trend_lab.evaluation.forecast import generate_future_timestamps
 
     latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
-    ts = _generate_future_timestamps(latest, "1h", 24)
+    ts = generate_future_timestamps(latest, "1h", 24)
 
     assert len(ts) == 24
     assert ts[23] == pd.Timestamp("2024-06-16 12:00:00", tz="utc")
 
 
 def test_future_timestamps_unsupported_timeframe():
-    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+    from src.crypto_trend_lab.evaluation.forecast import generate_future_timestamps
 
     latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
-    ts = _generate_future_timestamps(latest, "2x", 5)
+    ts = generate_future_timestamps(latest, "2x", 5)
     assert ts == []

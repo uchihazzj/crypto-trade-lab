@@ -26,6 +26,7 @@ from src.crypto_trend_lab.evaluation.full_report import (
     run_full_evaluation_report,
 )
 from src.crypto_trend_lab.evaluation.forecast import forecast_path, forward_forecast
+from src.crypto_trend_lab.models.forecast import run_dense_direct_forecast
 from src.crypto_trend_lab.evaluation.report import compare_baselines_and_models
 from src.crypto_trend_lab.models.dataset import (
     get_default_feature_columns,
@@ -964,13 +965,41 @@ with tab_models:
             key="full_test_pct",
         ) / 100.0
 
+        dense_col1, dense_col2 = st.columns(2)
+        with dense_col1:
+            include_dense = st.checkbox(
+                "Include dense horizons",
+                value=False,
+                key="full_dense_checkbox",
+                help=(
+                    "Evaluate all horizons 1..N instead of just 1, 4, 24. "
+                    "Dense evaluation can be slow — keep N small."
+                ),
+            )
+        with dense_col2:
+            if include_dense:
+                dense_max_h = st.number_input(
+                    "Max dense horizon",
+                    min_value=6,
+                    max_value=24,
+                    value=12,
+                    step=6,
+                    key="full_dense_max",
+                    help="Maximum horizon to evaluate. 12 is a reasonable default.",
+                )
+
         if st.button("Run Full Evaluation Report", type="primary", width="stretch"):
+            if include_dense:
+                horizons = tuple(range(1, dense_max_h + 1))
+            else:
+                horizons = (1, 4, 24)
+
             with st.spinner("Running full evaluation across all horizons..."):
                 try:
                     report = run_full_evaluation_report(
                         df_eval,
                         task_types=("regression", "classification"),
-                        horizons=(1, 4, 24),
+                        horizons=horizons,
                         test_size=full_test_pct,
                     )
                     report["summary"]["test_size_pct"] = full_test_pct * 100
@@ -1504,12 +1533,50 @@ with tab_models:
             # --- Forecast Path Chart ---
             st.divider()
             st.subheader("Forecast Path Chart")
-            st.caption(
-                "Train regression models on supported horizons (1, 4, 24) and "
-                "plot an experimental future close-price path. "
-                "Only sparse direct-horizon points are predicted — intermediate "
-                "points are connected by interpolation for visualization."
+
+            fp_mode = st.radio(
+                "Forecast Path Mode",
+                ["Sparse direct-horizon", "Dense direct-horizon"],
+                horizontal=True,
+                key="fp_mode",
+                help=(
+                    "Sparse: only supported horizons +1, +4, +24 are predicted; "
+                    "intermediate points are interpolated. "
+                    "Dense: trains one independent regression model per future step "
+                    "(1..path_length) — slower but produces a per-bar forecast."
+                ),
             )
+
+            if fp_mode == "Sparse direct-horizon":
+                st.caption(
+                    "Train regression models on supported horizons and plot an "
+                    "experimental future close-price path. "
+                    "**Path Length** is the maximum future horizon in bars — it does "
+                    "NOT produce a dense per-bar forecast. "
+                    "Only supported direct-horizon steps are predicted: "
+                    "**+1**, **+4**, and **+24** bars ahead. "
+                    "The orange dashed line connects these sparse model-estimated "
+                    "future close points via interpolation for visualization only. "
+                    "This is **not** a full simulated future trajectory and "
+                    "**not** investment advice."
+                )
+            else:
+                st.caption(
+                    "**Dense direct-horizon forecasting** trains one independent "
+                    "regression model per future step (1..path_length). "
+                    "Each step estimates the future close price from a model "
+                    "trained specifically for that horizon. "
+                    "This is **not** recursive forecasting, **not** a sequence "
+                    "model, and **not** a simulated trajectory. "
+                    "It is an experimental model output — **not** investment advice."
+                )
+                duration = timeframe_to_timedelta(timeframe)
+                duration_str = str(duration).replace("0 days ", "").replace("0:00:00", "")
+                st.caption(
+                    f"Path Length is measured in bars. "
+                    f"For {timeframe} data ({duration_str}), "
+                    f"path_length=24 means {24 * duration} of forecast horizon."
+                )
 
             fp_col1, fp_col2, fp_col3 = st.columns(3)
 
@@ -1520,10 +1587,16 @@ with tab_models:
                     key="fp_model",
                 )
             with fp_col2:
+                if fp_mode == "Sparse direct-horizon":
+                    path_len_options = [6, 12, 24, 48, 72, 168]
+                    path_len_default = 2  # 24
+                else:
+                    path_len_options = [6, 12, 24, 48, 72]
+                    path_len_default = 2  # 24
                 fp_path_len = st.selectbox(
                     "Path Length (bars)",
-                    [6, 12, 24, 48, 72, 168],
-                    index=2,  # default 24
+                    path_len_options,
+                    index=path_len_default,
                     key="fp_path_len",
                 )
             with fp_col3:
@@ -1534,19 +1607,54 @@ with tab_models:
                     key="chart_history_bars",
                 )
 
+            if fp_mode == "Sparse direct-horizon" and fp_path_len > 24:
+                st.info(
+                    "Only supported horizons up to **+24 bars** are currently "
+                    "available. Dense multi-step paths require sequence models "
+                    "or additional direct-horizon targets. The chart will show "
+                    "forecast points at +1, +4, and +24 bars only."
+                )
+
+            if fp_mode == "Dense direct-horizon" and fp_path_len > 48:
+                st.warning(
+                    "Path length {fp_path_len} will train {fp_path_len} "
+                    "independent models. This may take a while. Consider "
+                    "reducing the path length for faster results."
+                )
+
             if st.button("Generate Forecast Path", type="primary", width="stretch"):
-                with st.spinner("Generating sparse direct-horizon forecast path..."):
-                    try:
-                        fp_result = forecast_path(
-                            df_forecast,
-                            model_name=fp_model,
-                            path_length=fp_path_len,
-                            feature_columns=fc_feature_cols,
-                            timeframe=timeframe,
-                        )
-                        st.session_state["forecast_path_result"] = fp_result
-                    except Exception as exc:
-                        st.error(f"Forecast path failed: {exc}")
+                if fp_mode == "Sparse direct-horizon":
+                    with st.spinner("Generating sparse direct-horizon forecast path..."):
+                        try:
+                            fp_result = forecast_path(
+                                df_forecast,
+                                model_name=fp_model,
+                                path_length=fp_path_len,
+                                feature_columns=fc_feature_cols,
+                                timeframe=timeframe,
+                            )
+                            fp_result["_mode"] = "sparse"
+                            st.session_state["forecast_path_result"] = fp_result
+                        except Exception as exc:
+                            st.error(f"Forecast path failed: {exc}")
+                else:
+                    with st.spinner(
+                        f"Training {fp_path_len} models for dense direct-horizon forecast..."
+                    ):
+                        try:
+                            progress_bar = st.progress(0)
+                            fp_result = run_dense_direct_forecast(
+                                df_forecast,
+                                model_name=fp_model,
+                                path_length=fp_path_len,
+                                feature_columns=fc_feature_cols,
+                                timeframe=timeframe,
+                            )
+                            fp_result["_mode"] = "dense"
+                            st.session_state["forecast_path_result"] = fp_result
+                            progress_bar.progress(100)
+                        except Exception as exc:
+                            st.error(f"Forecast path failed: {exc}")
 
             if "forecast_path_result" in st.session_state:
                 fpr = st.session_state["forecast_path_result"]
@@ -1605,9 +1713,15 @@ with tab_models:
                         line_dash="dot", line_color="gray",
                     )
 
+                    is_dense = fpr.get("_mode") == "dense"
+                    forecast_label = (
+                        "Dense Direct-Horizon Experimental Forecast Path"
+                        if is_dense
+                        else "Sparse Direct-Horizon Forecast Path"
+                    )
                     fig_fp.update_layout(
                         title=(
-                            f"{fp_model} — Experimental Forecast Path "
+                            f"{fp_model} — {forecast_label} "
                             f"({symbol} {timeframe})"
                         ),
                         xaxis_title="Time (UTC)",
@@ -1632,24 +1746,33 @@ with tab_models:
                     # --- Forecast path table ---
                     st.divider()
                     st.subheader("Forecast Path Table")
-                    st.caption(
-                        "Sparse direct-horizon forecast path. "
-                        "Only supported horizons (1, 4, 24) are predicted. "
-                        "Missing intermediate steps are interpolated on the chart "
-                        "for visualization only."
-                    )
+                    if is_dense:
+                        st.caption(
+                            "Dense direct-horizon forecast path. "
+                            "One independent regression model was trained per step. "
+                            "Each predicted future close is model-estimated — "
+                            "this is **not** a simulated trajectory."
+                        )
+                    else:
+                        st.caption(
+                            "Sparse direct-horizon forecast path. "
+                            "Only supported horizons (1, 4, 24) are predicted. "
+                            "Missing intermediate steps are interpolated on the chart "
+                            "for visualization only."
+                        )
 
                     table_rows = []
                     for p in fpr["path_points"]:
                         row = {
-                            "step": p.get("forecast_step", p.get("horizon")),
-                            "timestamp": p.get("forecast_timestamp", ""),
-                            "target": p.get("target_column", ""),
+                            "forecast_step": p.get("forecast_step", p.get("horizon")),
+                            "forecast_timestamp": p.get("forecast_timestamp", ""),
+                            "target_column": p.get("target_column", ""),
+                            "model_name": fpr.get("model_name", ""),
                             "predicted_log_return": (
                                 f"{p['predicted_log_return']:.8f}"
                                 if "predicted_log_return" in p else "N/A"
                             ),
-                            "estimated_close": (
+                            "estimated_future_close": (
                                 f"{p['estimated_future_close']:.4f}"
                                 if "estimated_future_close" in p else "N/A"
                             ),
@@ -1660,24 +1783,84 @@ with tab_models:
                     table_df = pd.DataFrame(table_rows)
                     st.dataframe(table_df, width="stretch", hide_index=True)
 
+                    # Failed horizons (dense mode only)
+                    failed = fpr.get("failed_horizons", [])
+                    if failed:
+                        st.subheader("Skipped Horizons")
+                        failed_rows = []
+                        for f in failed:
+                            failed_rows.append({
+                                "horizon": f["horizon"],
+                                "target_column": f["target_column"],
+                                "reason": f["reason"],
+                            })
+                        st.dataframe(
+                            pd.DataFrame(failed_rows),
+                            width="stretch",
+                            hide_index=True,
+                        )
+
                     # Context info
-                    st.caption(
-                        f"Latest observed: {fpr['latest_timestamp']} | "
-                        f"Latest close: {fpr['latest_close']:.4f} | "
-                        f"Model: {fpr['model_name']} | "
-                        f"Training rows: {fpr['training_rows']}"
-                    )
+                    if is_dense:
+                        st.caption(
+                            f"Latest observed: {fpr['latest_timestamp']} | "
+                            f"Latest close: {fpr['latest_close']:.4f} | "
+                            f"Model: {fpr['model_name']} | "
+                            f"Training rows: {fpr['training_rows']} | "
+                            f"Forecast steps: {len(fpr['path_points'])} of {fpr['path_length']}"
+                        )
+                    else:
+                        st.caption(
+                            f"Latest observed: {fpr['latest_timestamp']} | "
+                            f"Latest close: {fpr['latest_close']:.4f} | "
+                            f"Model: {fpr['model_name']} | "
+                            f"Training rows: {fpr['training_rows']} | "
+                            f"Max supported horizon: {fpr.get('max_supported_horizon', 24)} bars"
+                        )
+
+                    # Flat prediction note for linear models
+                    if fpr["model_name"] in ("Ridge", "Last Return", "Moving Average", "Zero Return"):
+                        log_returns = [
+                            p.get("predicted_log_return", 0)
+                            for p in fpr["path_points"] if "error" not in p
+                        ]
+                        if log_returns and all(abs(r) < 0.001 for r in log_returns):
+                            st.caption(
+                                "Linear models such as Ridge may produce near-zero "
+                                "return forecasts when features have weak predictive "
+                                "power, resulting in a nearly flat path. This is "
+                                "expected behavior — it reflects the model's honest "
+                                "uncertainty about future price direction."
+                            )
 
                     # Cautions
-                    st.warning(
-                        "**Experimental forward forecast based on the selected "
-                        "model and available historical features.**\n\n"
-                        "This is not a trading signal or investment advice. "
-                        "The forecast path is model-estimated and may be unstable, "
-                        "especially with small datasets. "
-                        "Crypto markets are noisy, non-stationary, and high-risk. "
-                        "Past patterns do not guarantee future outcomes.\n\n"
-                        "Only horizons 1, 4, and 24 bars are directly predicted "
-                        "(sparse direct-horizon). The connecting line is "
-                        "interpolated for visualization."
-                    )
+                    if is_dense:
+                        st.warning(
+                            "**Dense direct-horizon forecast path — experimental "
+                            "research output.**\n\n"
+                            "This is NOT a trading signal or investment advice. "
+                            "The forecast path is model-estimated and may be unstable, "
+                            "especially with small datasets. "
+                            "Crypto markets are noisy, non-stationary, and high-risk. "
+                            "Past patterns do not guarantee future outcomes.\n\n"
+                            "Each step is predicted by an independent regression model "
+                            "trained for that specific horizon. Future close values are "
+                            "estimated as `latest_close × exp(predicted_log_return)`. "
+                            "This is **not** recursive forecasting and **not** a "
+                            "sequence model — no predicted values are used as inputs "
+                            "for later steps."
+                        )
+                    else:
+                        st.warning(
+                            "**Sparse direct-horizon forecast path — experimental "
+                            "research output.**\n\n"
+                            "This is NOT a trading signal or investment advice. "
+                            "The forecast path is model-estimated and may be unstable, "
+                            "especially with small datasets. "
+                            "Crypto markets are noisy, non-stationary, and high-risk. "
+                            "Past patterns do not guarantee future outcomes.\n\n"
+                            "Only horizons +1, +4, and +24 bars are directly predicted "
+                            "(sparse direct-horizon). The orange connecting line between "
+                            "these three points is interpolated for visualization only — "
+                            "it does NOT represent a simulated per-bar future trajectory."
+                        )

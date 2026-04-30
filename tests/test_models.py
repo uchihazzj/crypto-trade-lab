@@ -255,19 +255,39 @@ def test_majority_class_baseline_tie():
 
 def test_get_target_column_regression():
     assert get_target_column("regression", 1) == "target_return_1"
+    assert get_target_column("regression", 2) == "target_return_2"
     assert get_target_column("regression", 4) == "target_return_4"
+    assert get_target_column("regression", 5) == "target_return_5"
     assert get_target_column("regression", 24) == "target_return_24"
 
 
 def test_get_target_column_classification():
     assert get_target_column("classification", 1) == "target_direction_1"
+    assert get_target_column("classification", 2) == "target_direction_2"
     assert get_target_column("classification", 4) == "target_direction_4"
     assert get_target_column("classification", 24) == "target_direction_24"
 
 
-def test_get_target_column_invalid():
-    with pytest.raises(ValueError):
+def test_get_target_column_numpy_int64():
+    assert get_target_column("regression", np.int64(1)) == "target_return_1"
+    assert get_target_column("regression", np.int64(2)) == "target_return_2"
+    assert get_target_column("classification", np.int64(2)) == "target_direction_2"
+
+
+def test_get_target_column_numpy_int32():
+    assert get_target_column("regression", np.int32(4)) == "target_return_4"
+    assert get_target_column("classification", np.int32(24)) == "target_direction_24"
+
+
+def test_get_target_column_invalid_task():
+    with pytest.raises(ValueError, match="Unknown task_type"):
         get_target_column("invalid", 1)
+
+
+@pytest.mark.parametrize("bad_horizon", [0, -1, 1.5, "1", None, True, False])
+def test_get_target_column_invalid_horizon(bad_horizon):
+    with pytest.raises(ValueError, match="positive integer"):
+        get_target_column("regression", bad_horizon)
 
 
 def test_get_default_feature_columns_excludes_targets():
@@ -1302,10 +1322,10 @@ def test_forecast_path_only_supported_horizons():
 
 
 def test_forecast_path_future_timestamps_after_latest():
-    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+    from src.crypto_trend_lab.evaluation.forecast import generate_future_timestamps
 
     latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
-    ts = _generate_future_timestamps(latest, "1h", 5)
+    ts = generate_future_timestamps(latest, "1h", 5)
     assert len(ts) == 5
     assert all(t > latest for t in ts)
     assert ts[0] == pd.Timestamp("2024-06-15 13:00:00", tz="utc")
@@ -1313,20 +1333,20 @@ def test_forecast_path_future_timestamps_after_latest():
 
 
 def test_forecast_path_future_timestamps_4h():
-    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+    from src.crypto_trend_lab.evaluation.forecast import generate_future_timestamps
 
     latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
-    ts = _generate_future_timestamps(latest, "4h", 3)
+    ts = generate_future_timestamps(latest, "4h", 3)
     assert len(ts) == 3
     assert ts[0] == pd.Timestamp("2024-06-15 16:00:00", tz="utc")
     assert ts[2] == pd.Timestamp("2024-06-16 00:00:00", tz="utc")
 
 
 def test_forecast_path_future_timestamps_1d():
-    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+    from src.crypto_trend_lab.evaluation.forecast import generate_future_timestamps
 
     latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
-    ts = _generate_future_timestamps(latest, "1d", 5)
+    ts = generate_future_timestamps(latest, "1d", 5)
     assert len(ts) == 5
     assert ts[0] == pd.Timestamp("2024-06-16 12:00:00", tz="utc")
 
@@ -1435,6 +1455,262 @@ def test_forecast_path_no_live_network_calls():
     df = _make_features_df(300)
     result = forecast_path(
         df, model_name="Ridge", path_length=24, timeframe="1h",
+    )
+    assert result is not None
+
+
+def test_forecast_path_sparse_not_per_bar():
+    """path_length=48 must produce exactly 3 forecast points, not 48."""
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Ridge", path_length=48, timeframe="1h",
+    )
+    points = [p for p in result["path_points"] if "error" not in p]
+    assert len(points) == 3, (
+        f"Expected 3 sparse points (h=1,4,24), got {len(points)}"
+    )
+    assert {p["horizon"] for p in points} == {1, 4, 24}
+
+
+@pytest.mark.parametrize("path_len,expected_horizons", [
+    (6, {1, 4}),
+    (12, {1, 4}),
+    (24, {1, 4, 24}),
+    (48, {1, 4, 24}),
+    (72, {1, 4, 24}),
+    (168, {1, 4, 24}),
+])
+def test_forecast_path_horizon_selection(path_len, expected_horizons):
+    """Only horizons <= path_length are included in forecast path."""
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Ridge", path_length=path_len, timeframe="1h",
+    )
+    points = [p for p in result["path_points"] if "error" not in p]
+    horizons = {p["horizon"] for p in points}
+    assert horizons == expected_horizons, (
+        f"path_length={path_len}: expected {expected_horizons}, got {horizons}"
+    )
+
+
+def test_forecast_path_max_supported_horizon_in_result():
+    """forecast_path must include max_supported_horizon in the return dict."""
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Ridge", path_length=24, timeframe="1h",
+    )
+    assert "max_supported_horizon" in result
+    assert result["max_supported_horizon"] == 24
+
+
+def test_forecast_path_table_columns_complete():
+    """Every path_point with no error must contain all table columns."""
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Ridge", path_length=24, timeframe="1h",
+    )
+    for p in result["path_points"]:
+        if "error" not in p:
+            for col in ("horizon", "forecast_step", "forecast_timestamp",
+                        "target_column", "predicted_log_return",
+                        "estimated_future_close"):
+                assert col in p, f"Missing column {col!r} in path_point"
+    # model_name must be in the top-level result for the table
+    assert "model_name" in result
+
+
+# ---------------------------------------------------------------------------
+# add_dense_return_targets
+# ---------------------------------------------------------------------------
+
+
+def test_add_dense_return_targets_creates_all_columns():
+    from src.crypto_trend_lab.features.target import add_dense_return_targets
+
+    df = _make_ohlcv_df(50)
+    max_h = 12
+    result = add_dense_return_targets(df, max_h)
+
+    for h in range(1, max_h + 1):
+        assert f"target_return_{h}" in result.columns
+        assert f"target_direction_{h}" in result.columns
+    assert len(result.columns) == 2 * max_h
+
+
+def test_add_dense_return_targets_formula():
+    """target_return_h[t] = ln(close[t+h] / close[t])."""
+    from src.crypto_trend_lab.features.target import add_dense_return_targets
+
+    df = _make_ohlcv_df(20)
+    result = add_dense_return_targets(df, max_horizon=3)
+    close = df["close"].values
+
+    for h in (1, 2, 3):
+        col = f"target_return_{h}"
+        for t in range(20 - h):
+            expected = np.log(close[t + h] / close[t])
+            assert np.isclose(result[col].iloc[t], expected)
+
+
+def test_add_dense_return_targets_final_h_rows_nan():
+    """Last h rows of target_return_h and target_direction_h must be NaN."""
+    from src.crypto_trend_lab.features.target import add_dense_return_targets
+
+    df = _make_ohlcv_df(30)
+    result = add_dense_return_targets(df, max_horizon=5)
+
+    for h in (1, 2, 3, 5):
+        ret_col = f"target_return_{h}"
+        dir_col = f"target_direction_{h}"
+        for t in range(30 - h, 30):
+            assert pd.isna(result[ret_col].iloc[t])
+            assert pd.isna(result[dir_col].iloc[t])
+
+
+def test_add_dense_return_targets_does_not_mutate_input():
+    from src.crypto_trend_lab.features.target import add_dense_return_targets
+
+    df = _make_ohlcv_df(30)
+    original = df.copy()
+    _ = add_dense_return_targets(df, max_horizon=6)
+    pd.testing.assert_frame_equal(df, original)
+
+
+# ---------------------------------------------------------------------------
+# run_dense_direct_forecast
+# ---------------------------------------------------------------------------
+
+
+def test_dense_forecast_returns_one_point_per_step():
+    """path_length=6 must produce exactly 6 path points (one per step)."""
+    from src.crypto_trend_lab.models.forecast import run_dense_direct_forecast
+
+    df = _make_features_df(200)
+    result = run_dense_direct_forecast(
+        df, model_name="Ridge", path_length=6, timeframe="1h",
+    )
+    assert "error" not in result
+    points = [p for p in result["path_points"] if "error" not in p]
+    assert len(points) == 6
+    assert {p["forecast_step"] for p in points} == set(range(1, 7))
+
+
+def test_dense_forecast_timestamps_correct():
+    """Each forecast_timestamp = latest_ts + h * timeframe_delta."""
+    from src.crypto_trend_lab.models.forecast import run_dense_direct_forecast
+
+    df = _make_features_df(200)
+    result = run_dense_direct_forecast(
+        df, model_name="Ridge", path_length=3, timeframe="1h",
+    )
+    points = [p for p in result["path_points"] if "error" not in p]
+    latest = result["latest_timestamp"]
+    assert len(points) == 3
+    assert points[0]["forecast_timestamp"] == latest + pd.Timedelta(hours=1)
+    assert points[1]["forecast_timestamp"] == latest + pd.Timedelta(hours=2)
+    assert points[2]["forecast_timestamp"] == latest + pd.Timedelta(hours=3)
+
+
+def test_dense_forecast_close_calculation():
+    """estimated_future_close = latest_close * exp(pred_log_return)."""
+    from src.crypto_trend_lab.models.forecast import run_dense_direct_forecast
+
+    df = _make_features_df(200)
+    result = run_dense_direct_forecast(
+        df, model_name="Ridge", path_length=4, timeframe="1h",
+    )
+    lc = result["latest_close"]
+    for p in result["path_points"]:
+        if "error" not in p:
+            expected = lc * np.exp(p["predicted_log_return"])
+            assert abs(p["estimated_future_close"] - expected) < 1e-6
+
+
+def test_dense_forecast_targets_excluded_from_features():
+    """Dense forecast must not use target columns as input features."""
+    from src.crypto_trend_lab.models.forecast import run_dense_direct_forecast
+    from src.crypto_trend_lab.models.dataset import get_default_feature_columns
+
+    df = _make_features_df(200)
+    features = get_default_feature_columns(df)
+    # Features must not contain any target_* column
+    assert not any(c.startswith("target_") for c in features)
+
+    result = run_dense_direct_forecast(
+        df, model_name="Ridge", path_length=3, timeframe="1h",
+        feature_columns=features,
+    )
+    assert "error" not in result
+
+
+def test_dense_forecast_classification_blocked():
+    """Only regression models can produce a dense price path."""
+    from src.crypto_trend_lab.models.forecast import run_dense_direct_forecast
+
+    df = _make_features_df(200)
+    result = run_dense_direct_forecast(
+        df, model_name="Logistic Regression", path_length=6, timeframe="1h",
+    )
+    # "Logistic Regression" is not in _REGRESSION_MODELS
+    assert "error" in result
+    assert "regression" in result["error"].lower()
+
+
+def test_dense_forecast_handles_failed_horizon():
+    """A horizon with insufficient data must be logged, not crash the path."""
+    from src.crypto_trend_lab.models.forecast import run_dense_direct_forecast
+
+    # Small df where horizon 24 has few labeled rows
+    df = _make_features_df(50)
+    result = run_dense_direct_forecast(
+        df, model_name="Ridge", path_length=30, timeframe="1h",
+    )
+    # Some horizons near 30 should fail due to insufficient labeled rows
+    assert "failed_horizons" in result
+    # But earlier horizons (1, 2, 3...) should succeed
+    points = [p for p in result["path_points"] if "error" not in p]
+    assert len(points) > 0
+    # Successful points + failed horizons = path_length
+    assert len(points) + len(result["failed_horizons"]) == 30
+
+
+# ---------------------------------------------------------------------------
+# Sparse vs dense distinction
+# ---------------------------------------------------------------------------
+
+
+def test_sparse_mode_fewer_points_than_path_length():
+    """Sparse mode with path_length=24 gives exactly 3 points (1, 4, 24)."""
+    df = _make_features_df(300)
+    result = forecast_path(
+        df, model_name="Ridge", path_length=24, timeframe="1h",
+    )
+    points = [p for p in result["path_points"] if "error" not in p]
+    assert len(points) == 3, (
+        f"Sparse mode: expected 3 points, got {len(points)}"
+    )
+
+
+def test_dense_mode_points_equal_path_length():
+    """Dense mode with path_length=12 gives exactly 12 points."""
+    from src.crypto_trend_lab.models.forecast import run_dense_direct_forecast
+
+    df = _make_features_df(300)
+    result = run_dense_direct_forecast(
+        df, model_name="Ridge", path_length=12, timeframe="1h",
+    )
+    points = [p for p in result["path_points"] if "error" not in p]
+    assert len(points) == 12, (
+        f"Dense mode: expected 12 points, got {len(points)}"
+    )
+
+
+def test_dense_forecast_no_live_network_calls():
+    from src.crypto_trend_lab.models.forecast import run_dense_direct_forecast
+
+    df = _make_features_df(100)
+    result = run_dense_direct_forecast(
+        df, model_name="Ridge", path_length=3, timeframe="1h",
     )
     assert result is not None
 
@@ -1749,13 +2025,13 @@ def test_model_evaluation_uses_full_features():
 
 def test_forecast_path_uses_timedelta_not_int():
     """Forecast path timestamp generation must use Timedelta arithmetic."""
-    from src.crypto_trend_lab.evaluation.forecast import _generate_future_timestamps
+    from src.crypto_trend_lab.evaluation.forecast import generate_future_timestamps
 
     latest = pd.Timestamp("2024-06-15 12:00:00", tz="utc")
 
     # This would raise TypeError if Timestamp + int was used
     for tf in ["1m", "5m", "1h", "4h", "1d", "1w"]:
-        ts = _generate_future_timestamps(latest, tf, 3)
+        ts = generate_future_timestamps(latest, tf, 3)
         assert len(ts) == 3, f"Failed for timeframe {tf}"
         for t in ts:
             assert t > latest

@@ -264,7 +264,7 @@ def forward_forecast(
 _SPARSE_HORIZONS = (1, 4, 24)
 
 
-def _generate_future_timestamps(
+def generate_future_timestamps(
     latest_ts: pd.Timestamp,
     timeframe: str,
     path_length: int,
@@ -381,7 +381,7 @@ def forecast_path(
         return {"error": f"path_length {path_length} < minimum supported horizon 1."}
 
     # Generate future timestamps for all steps
-    future_ts = _generate_future_timestamps(latest_ts, timeframe, path_length)
+    future_ts = generate_future_timestamps(latest_ts, timeframe, path_length)
     if not future_ts:
         return {"error": f"Unknown timeframe {timeframe!r}."}
 
@@ -448,6 +448,7 @@ def forecast_path(
         "model_name": model_name,
         "training_rows": total_labeled,
         "path_length": path_length,
+        "max_supported_horizon": max(_SPARSE_HORIZONS),
         "timeframe": timeframe,
         "chart_history": chart_history,
     }

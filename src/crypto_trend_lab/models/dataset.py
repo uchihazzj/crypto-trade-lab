@@ -5,13 +5,32 @@ Prepare X, y, timestamps and feature column lists from feature DataFrames.
 
 from __future__ import annotations
 
+import operator
+
 import numpy as np
 import pandas as pd
 
 from src.crypto_trend_lab.features.pipeline import get_model_input_columns
-from src.crypto_trend_lab.features.target import TARGET_COLUMNS
 
 
+def _normalize_positive_int(value: object, name: str = "value") -> int:
+    """Coerce *value* to a positive Python int.
+
+    Accepts Python ``int`` and NumPy integer types (e.g. ``np.int64``).
+    Rejects ``bool``, ``float``, ``str``, ``None``, zero, and negatives.
+    """
+    # bool is a subclass of int but must be rejected.
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer, got bool({value})")
+    try:
+        n = operator.index(value)
+    except TypeError:
+        raise ValueError(
+            f"{name} must be a positive integer, got {type(value).__name__}({value!r})"
+        )
+    if n < 1:
+        raise ValueError(f"{name} must be a positive integer, got {n}")
+    return n
 def get_default_feature_columns(df: pd.DataFrame) -> list[str]:
     """Return columns in *df* suitable for model input.
 
@@ -32,21 +51,19 @@ def get_target_column(task_type: str, horizon: int) -> str:
         "regression" → target_return_{horizon}
         "classification" → target_direction_{horizon}
     horizon : int
-        Forecast horizon (1, 4, or 24).
+        Positive integer forecast horizon.  Accepts Python ``int`` and
+        NumPy integer types (``np.int64``, ``np.int32``, etc.).
     """
+    h = _normalize_positive_int(horizon, name="horizon")
+
     if task_type == "regression":
-        col = f"target_return_{horizon}"
+        return f"target_return_{h}"
     elif task_type == "classification":
-        col = f"target_direction_{horizon}"
+        return f"target_direction_{h}"
     else:
         raise ValueError(
             f"Unknown task_type {task_type!r}. Use 'regression' or 'classification'."
         )
-
-    if col not in TARGET_COLUMNS:
-        raise ValueError(f"Unsupported target column {col!r} for horizon {horizon}")
-
-    return col
 
 
 def prepare_modeling_data(
@@ -88,7 +105,7 @@ def prepare_modeling_data(
         raise ValueError(f"Feature columns not in DataFrame: {missing}")
 
     # Exclude target columns from features (safety check)
-    features = [c for c in feature_columns if c not in TARGET_COLUMNS]
+    features = [c for c in feature_columns if not c.startswith("target_")]
 
     subset = df[features + [target_column]].copy()
 
