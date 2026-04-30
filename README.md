@@ -389,19 +389,58 @@ data quality checks, feature generation, model evaluation, and forecast fitting.
   is not meaningful for candlestick analysis).
 
 **Chart controls** (available in Fetch & Chart and Local Storage tabs):
-- Time range: Full range, Last 7/30/90 days, or custom.
+- Time range: Full range, Last 1/7/30/90/180/365 days, or Custom range.
 - Max candles: 500, 1000, 2000, 5000.
-- Display summary shows: full rows, view rows, displayed candles, display mode
-  (raw or aggregated), and approximate bars per displayed candle.
+- Custom range: select start and end dates for arbitrary windows.
+- Display summary shows: full dataset rows, selected range rows, displayed
+  candles, display mode (raw/aggregated), bars per candle, range timestamps,
+  chart timestamps, and base timeframe.
 
-**Table preview**: Shows the latest 500 raw rows by default. The full dataset
-row count is always shown. Aggregated overview is available as an alternative.
+**Table preview**: Two modes — "Latest raw rows" (default, shows tail of df_full)
+and "Current chart candles" (shows df_chart used in the rendered candlestick).
+The full dataset row count is always displayed.
 
 **Modeling protection**:
 - `build_features()` always receives `df_full`.
 - `check_ohlcv_quality()` always receives `df_full`.
 - Model evaluation and forward forecast always use full features.
 - `df_chart` and `df_preview` are rendering-only artifacts.
+
+### Multi-Resolution Chart Display
+
+Plotly's built-in mouse-wheel zoom only scales the rendered SVG — it does not
+reaggregate data. When a chart is aggregated from 50000 bars into 1000 display
+candles, zooming in shows larger rendered candles, not the original raw bars.
+This is an inherent limitation of client-side zoom in Streamlit+Plotly.
+
+**Solution**: Use explicit Streamlit time-range controls to change the chart
+window. Each range change triggers a fresh `df_full → filter → df_view →
+aggregate → df_chart` pipeline on the server side.
+
+**Processing order** (enforced in both Fetch & Chart and Local Storage tabs):
+```
+df_full  (full dataset, unchanged)
+  → filter_ohlcv_by_chart_range(range_option) → df_view
+  → prepare_candlestick_display_data(df_view, max_bars) → df_chart
+  → candlestick_chart(df_chart)
+```
+
+- Filter first, aggregate second. Never aggregate before filtering.
+- If `len(df_view) ≤ max_candles`: display raw candles.
+- If `len(df_view) > max_candles`: aggregate into display candles.
+- Narrower time ranges produce fewer raw bars per display candle.
+- The narrowest ranges (e.g. Last 1 day with 1h data) display raw candles.
+
+**How to inspect finer-grained candles**:
+Select a narrower chart time range. For example:
+- Full range (50000 bars @ 5m, max 1000 → ~50 bars/candle)
+- Last 30 days (~8640 bars @ 5m, max 1000 → ~9 bars/candle)
+- Last 7 days (~2016 bars @ 5m, max 1000 → ~2 bars/candle)
+- Last 1 day (~288 bars @ 5m, max 1000 → raw candles)
+
+No Plotly relayout callbacks, streamlit-plotly-events, or automatic
+mouse-wheel reaggregation is used. All reaggregation is explicit via
+Streamlit controls.
 
 ### Performance Recommendations for Large Datasets
 

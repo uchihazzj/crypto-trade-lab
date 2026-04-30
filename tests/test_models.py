@@ -1760,3 +1760,273 @@ def test_forecast_path_uses_timedelta_not_int():
         for t in ts:
             assert t > latest
             assert t.tzinfo is not None
+
+
+# ---------------------------------------------------------------------------
+# filter_ohlcv_by_chart_range
+# ---------------------------------------------------------------------------
+
+
+def test_filter_ohlcv_full_range_returns_all_rows():
+    from src.crypto_trend_lab.visualization.display import filter_ohlcv_by_chart_range
+
+    df = _make_ohlcv_for_agg(100)
+    result = filter_ohlcv_by_chart_range(df, "Full range")
+    assert len(result) == 100
+
+
+def test_filter_ohlcv_last_1_day():
+    from src.crypto_trend_lab.visualization.display import filter_ohlcv_by_chart_range
+
+    df = _make_ohlcv_for_agg(168)  # 7 days of 1h data
+    result = filter_ohlcv_by_chart_range(df, "Last 1 day")
+    max_ts = df["timestamp"].max()
+    cutoff = max_ts - pd.Timedelta(days=1)
+    assert (result["timestamp"] >= cutoff).all()
+    # Should be roughly 24 bars (1h × 24)
+    assert 20 <= len(result) <= 28
+
+
+def test_filter_ohlcv_last_7_days():
+    from src.crypto_trend_lab.visualization.display import filter_ohlcv_by_chart_range
+
+    df = _make_ohlcv_for_agg(500)  # ~20 days of 1h data
+    result = filter_ohlcv_by_chart_range(df, "Last 7 days")
+    max_ts = df["timestamp"].max()
+    cutoff = max_ts - pd.Timedelta(days=7)
+    assert (result["timestamp"] >= cutoff).all()
+    # Roughly 168 bars (1h × 24 × 7)
+    assert 150 <= len(result) <= 200
+
+
+def test_filter_ohlcv_last_30_days():
+    from src.crypto_trend_lab.visualization.display import filter_ohlcv_by_chart_range
+
+    df = _make_ohlcv_for_agg(1000)
+    result = filter_ohlcv_by_chart_range(df, "Last 30 days")
+    max_ts = df["timestamp"].max()
+    cutoff = max_ts - pd.Timedelta(days=30)
+    assert (result["timestamp"] >= cutoff).all()
+
+
+def test_filter_ohlcv_last_90_days():
+    from src.crypto_trend_lab.visualization.display import filter_ohlcv_by_chart_range
+
+    df = _make_ohlcv_for_agg(3000)
+    result = filter_ohlcv_by_chart_range(df, "Last 90 days")
+    max_ts = df["timestamp"].max()
+    cutoff = max_ts - pd.Timedelta(days=90)
+    assert (result["timestamp"] >= cutoff).all()
+
+
+def test_filter_ohlcv_last_180_days():
+    from src.crypto_trend_lab.visualization.display import filter_ohlcv_by_chart_range
+
+    df = _make_ohlcv_for_agg(5000)
+    result = filter_ohlcv_by_chart_range(df, "Last 180 days")
+    max_ts = df["timestamp"].max()
+    cutoff = max_ts - pd.Timedelta(days=180)
+    assert (result["timestamp"] >= cutoff).all()
+
+
+def test_filter_ohlcv_last_365_days():
+    from src.crypto_trend_lab.visualization.display import filter_ohlcv_by_chart_range
+
+    df = _make_ohlcv_for_agg(10000)
+    result = filter_ohlcv_by_chart_range(df, "Last 365 days")
+    max_ts = df["timestamp"].max()
+    cutoff = max_ts - pd.Timedelta(days=365)
+    assert (result["timestamp"] >= cutoff).all()
+
+
+def test_filter_ohlcv_custom_range():
+    from src.crypto_trend_lab.visualization.display import filter_ohlcv_by_chart_range
+
+    df = _make_ohlcv_for_agg(200)
+    start = df["timestamp"].iloc[50]
+    end = df["timestamp"].iloc[149]
+    result = filter_ohlcv_by_chart_range(
+        df, "Custom range", custom_start=start, custom_end=end
+    )
+    assert len(result) == 100
+    assert result["timestamp"].min() >= start
+    assert result["timestamp"].max() <= end
+
+
+def test_filter_ohlcv_uses_data_max_not_now():
+    """Last-N-day ranges must use df['timestamp'].max(), not pd.Timestamp.now()."""
+    from src.crypto_trend_lab.visualization.display import filter_ohlcv_by_chart_range
+
+    df = _make_ohlcv_for_agg(200)
+    # Data ends at index 199: '2024-01-09 07:00:00+00:00'
+    data_max = df["timestamp"].max()
+    result = filter_ohlcv_by_chart_range(df, "Last 1 day")
+    # All returned timestamps must be within 1 day of data_max
+    assert (result["timestamp"] >= data_max - pd.Timedelta(days=1)).all()
+
+
+def test_filter_ohlcv_empty_range_raises():
+    from src.crypto_trend_lab.visualization.display import filter_ohlcv_by_chart_range
+
+    df = _make_ohlcv_for_agg(50)
+    # Custom range entirely before the data
+    with pytest.raises(ValueError, match="No data in selected range"):
+        filter_ohlcv_by_chart_range(
+            df, "Custom range",
+            custom_start=pd.Timestamp("2020-01-01", tz="utc"),
+            custom_end=pd.Timestamp("2020-01-02", tz="utc"),
+        )
+
+
+def test_filter_ohlcv_custom_requires_both_dates():
+    from src.crypto_trend_lab.visualization.display import filter_ohlcv_by_chart_range
+
+    df = _make_ohlcv_for_agg(50)
+    with pytest.raises(ValueError, match="requires both"):
+        filter_ohlcv_by_chart_range(
+            df, "Custom range", custom_start=pd.Timestamp("2024-01-01", tz="utc"),
+        )
+
+
+def test_filter_ohlcv_unknown_range_option():
+    from src.crypto_trend_lab.visualization.display import filter_ohlcv_by_chart_range
+
+    df = _make_ohlcv_for_agg(50)
+    with pytest.raises(ValueError, match="Unknown range_option"):
+        filter_ohlcv_by_chart_range(df, "Last 2 weeks")
+
+
+def test_filter_ohlcv_preserves_timezone():
+    from src.crypto_trend_lab.visualization.display import filter_ohlcv_by_chart_range
+
+    df = _make_ohlcv_for_agg(200)
+    for option in ["Full range", "Last 7 days", "Last 30 days"]:
+        result = filter_ohlcv_by_chart_range(df, option)
+        assert result["timestamp"].dt.tz is not None
+
+
+def test_filter_ohlcv_no_mutation():
+    """filter_ohlcv_by_chart_range must not mutate the input df_full."""
+    from src.crypto_trend_lab.visualization.display import filter_ohlcv_by_chart_range
+
+    df = _make_ohlcv_for_agg(200)
+    original_len = len(df)
+    _ = filter_ohlcv_by_chart_range(df, "Last 7 days")
+    assert len(df) == original_len
+
+
+# ---------------------------------------------------------------------------
+# Multi-resolution: aggregation order
+# ---------------------------------------------------------------------------
+
+
+def test_filter_before_aggregate_in_correct_order():
+    """
+    Correct order: df_full -> filter -> df_view -> aggregate -> df_chart.
+    This test verifies that narrower ranges produce smaller
+    approx_bars_per_candle when max_bars is fixed.
+    """
+    from src.crypto_trend_lab.visualization.display import (
+        filter_ohlcv_by_chart_range,
+        prepare_candlestick_display_data,
+        get_display_summary,
+    )
+
+    df_full = _make_ohlcv_for_agg(5000)
+    max_bars = 200
+
+    # Full range
+    df_view_full = filter_ohlcv_by_chart_range(df_full, "Full range")
+    display_full = prepare_candlestick_display_data(df_view_full, max_bars=max_bars)
+    summary_full = get_display_summary(df_full, df_view_full, display_full)
+
+    # Last 30 days (much narrower — last 720 bars of 5000)
+    df_view_30d = filter_ohlcv_by_chart_range(df_full, "Last 30 days")
+    display_30d = prepare_candlestick_display_data(df_view_30d, max_bars=max_bars)
+    summary_30d = get_display_summary(df_full, df_view_30d, display_30d)
+
+    # Narrower range should have fewer view rows
+    assert summary_30d["view_rows"] < summary_full["view_rows"]
+
+    # Narrower range should have same or smaller approx_bars_per_candle
+    if summary_30d["approx_bars_per_candle"] and summary_full["approx_bars_per_candle"]:
+        assert summary_30d["approx_bars_per_candle"] <= summary_full["approx_bars_per_candle"]
+
+
+def test_narrower_range_can_be_raw_when_full_is_aggregated():
+    """
+    Full range may be aggregated, while a narrow enough range
+    should display raw candles.
+    """
+    from src.crypto_trend_lab.visualization.display import (
+        filter_ohlcv_by_chart_range,
+        prepare_candlestick_display_data,
+    )
+
+    df_full = _make_ohlcv_for_agg(5000)
+    max_bars = 1000
+
+    df_view_full = filter_ohlcv_by_chart_range(df_full, "Full range")
+    display_full = prepare_candlestick_display_data(df_view_full, max_bars=max_bars)
+    assert display_full["display_mode"] == "aggregated"
+
+    # Last 1 day: only ~24 bars — should be raw
+    df_view_1d = filter_ohlcv_by_chart_range(df_full, "Last 1 day")
+    display_1d = prepare_candlestick_display_data(df_view_1d, max_bars=max_bars)
+    assert display_1d["display_mode"] == "raw"
+
+
+def test_df_full_row_count_preserved_in_summary():
+    """get_display_summary must report correct df_full row count."""
+    from src.crypto_trend_lab.visualization.display import (
+        filter_ohlcv_by_chart_range,
+        prepare_candlestick_display_data,
+        get_display_summary,
+    )
+
+    df_full = _make_ohlcv_for_agg(5000)
+    df_view = filter_ohlcv_by_chart_range(df_full, "Last 30 days")
+    display = prepare_candlestick_display_data(df_view, max_bars=500)
+    summary = get_display_summary(df_full, df_view, display)
+
+    assert summary["full_rows"] == 5000
+    assert summary["view_rows"] == len(df_view)
+    assert summary["view_rows"] < 5000  # 30d is a subset
+
+
+def test_aggregation_never_reduces_full_dataset():
+    """
+    df_full must remain intact. Aggregation only creates new display
+    DataFrames; it never shrinks df_full.
+    """
+    from src.crypto_trend_lab.visualization.display import (
+        filter_ohlcv_by_chart_range,
+        aggregate_ohlcv_by_count,
+    )
+
+    df_full = _make_ohlcv_for_agg(5000)
+    original_len = len(df_full)
+
+    df_view = filter_ohlcv_by_chart_range(df_full, "Full range")
+    df_chart = aggregate_ohlcv_by_count(df_view, target_bars=200)
+
+    # df_full unchanged
+    assert len(df_full) == original_len
+    # df_chart is smaller
+    assert len(df_chart) <= 200
+    # df_chart is a different object
+    assert df_chart is not df_full
+
+
+def test_multi_resolution_no_live_network_calls():
+    from src.crypto_trend_lab.visualization.display import (
+        filter_ohlcv_by_chart_range,
+        prepare_candlestick_display_data,
+        get_display_summary,
+    )
+
+    df_full = _make_ohlcv_for_agg(1000)
+    df_view = filter_ohlcv_by_chart_range(df_full, "Last 7 days")
+    display = prepare_candlestick_display_data(df_view, max_bars=500)
+    summary = get_display_summary(df_full, df_view, display)
+    assert summary["full_rows"] == 1000

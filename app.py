@@ -51,7 +51,7 @@ from src.crypto_trend_lab.visualization.display import (
     DEFAULT_MAX_CANDLES,
     DEFAULT_PREVIEW_ROWS,
     aggregate_ohlcv_by_count,
-    filter_by_time_range,
+    filter_ohlcv_by_chart_range,
     get_display_summary,
     prepare_candlestick_display_data,
 )
@@ -275,12 +275,17 @@ with tab_fetch:
 
             # --- Chart time range controls ---
             st.caption("**Chart Display Controls**")
+            st.caption(
+                "Select a narrower time range to see finer-grained candles. "
+                "The full dataset is always used for storage, features, and modeling."
+            )
             chart_col1, chart_col2 = st.columns(2)
             with chart_col1:
                 chart_range = st.selectbox(
                     "Time Range",
-                    ["Full range", "Last 7 days", "Last 30 days",
-                     "Last 90 days", "Custom range"],
+                    ["Full range", "Last 1 day", "Last 7 days", "Last 30 days",
+                     "Last 90 days", "Last 180 days", "Last 365 days",
+                     "Custom range"],
                     key="fetch_chart_range",
                 )
             with chart_col2:
@@ -291,24 +296,41 @@ with tab_fetch:
                     key="fetch_max_candles",
                 )
 
-            # Apply time range filter
-            now_utc = pd.Timestamp.now(tz="utc")
-            if chart_range == "Last 7 days":
-                df_view = filter_by_time_range(
-                    df_full, start=now_utc - pd.Timedelta(days=7), end=now_utc
-                )
-            elif chart_range == "Last 30 days":
-                df_view = filter_by_time_range(
-                    df_full, start=now_utc - pd.Timedelta(days=30), end=now_utc
-                )
-            elif chart_range == "Last 90 days":
-                df_view = filter_by_time_range(
-                    df_full, start=now_utc - pd.Timedelta(days=90), end=now_utc
-                )
-            else:
-                df_view = df_full  # Full range
+            # Custom range date pickers
+            custom_start = None
+            custom_end = None
+            if chart_range == "Custom range":
+                from datetime import datetime, timezone
 
-            # Aggregation for display
+                ref_max = df_full["timestamp"].max()
+                ref_min = df_full["timestamp"].min()
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    custom_start = st.date_input(
+                        "Start date",
+                        value=ref_min.date() if pd.notna(ref_min) else datetime.now(timezone.utc).date(),
+                        key="fetch_custom_start",
+                    )
+                with cc2:
+                    custom_end = st.date_input(
+                        "End date",
+                        value=ref_max.date() if pd.notna(ref_max) else datetime.now(timezone.utc).date(),
+                        key="fetch_custom_end",
+                    )
+                custom_start = pd.Timestamp(custom_start).tz_localize("utc") if custom_start else None
+                custom_end = pd.Timestamp(custom_end).tz_localize("utc") + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1) if custom_end else None
+
+            # Filter by chart range -> df_view
+            try:
+                df_view = filter_ohlcv_by_chart_range(
+                    df_full, chart_range,
+                    custom_start=custom_start, custom_end=custom_end,
+                )
+            except ValueError as exc:
+                st.error(str(exc))
+                df_view = df_full
+
+            # Aggregation for display: df_view -> df_chart
             display_result = prepare_candlestick_display_data(df_view, max_bars=max_candles)
             df_chart = display_result["df_chart"]
             disp_summary = get_display_summary(df_full, df_view, display_result)
@@ -320,25 +342,51 @@ with tab_fetch:
             st.plotly_chart(fig, width="stretch")
 
             # Display summary
-            st.caption(
-                f"Full: {disp_summary['full_rows']} rows  |  "
-                f"View: {disp_summary['view_rows']} rows  |  "
-                f"Displayed: {disp_summary['displayed_candles']} candles  |  "
-                f"Mode: {disp_summary['display_mode']}"
-                + (
-                    f"  |  ~{disp_summary['approx_bars_per_candle']} bars/candle"
-                    if disp_summary['approx_bars_per_candle'] else ""
+            st.divider()
+            st.caption("**Display Summary**")
+            sc1, sc2, sc3, sc4 = st.columns(4)
+            sc1.caption(f"Full dataset: {disp_summary['full_rows']} rows")
+            sc2.caption(f"Selected range: {disp_summary['view_rows']} rows")
+            sc3.caption(f"Displayed candles: {disp_summary['displayed_candles']}")
+            sc4.caption(f"Mode: {disp_summary['display_mode']}")
+
+            if disp_summary["approx_bars_per_candle"]:
+                st.caption(
+                    f"~{disp_summary['approx_bars_per_candle']} raw bars per displayed candle. "
+                    f"To see finer-grained candles, select a narrower time range."
                 )
-            )
+
+            sc5, sc6, sc7, sc8 = st.columns(4)
+            sc5.caption(f"Range start: {disp_summary['range_start']}")
+            sc6.caption(f"Range end: {disp_summary['range_end']}")
+            sc7.caption(f"Chart start: {disp_summary['chart_start']}")
+            sc8.caption(f"Chart end: {disp_summary['chart_end']}")
+
+            if disp_summary["base_timeframe"]:
+                st.caption(f"Base timeframe: {disp_summary['base_timeframe']}")
 
             # Table preview
             with st.expander("Data Preview"):
-                st.caption(
-                    f"Showing latest {min(DEFAULT_PREVIEW_ROWS, len(df_full))} "
-                    f"of {len(df_full)} total rows. Full data is used for "
-                    f"storage, features, modeling, and evaluation."
+                preview_mode = st.radio(
+                    "Preview Mode",
+                    ["Latest raw rows", "Current chart candles"],
+                    horizontal=True,
+                    key="fetch_preview_mode",
                 )
-                st.dataframe(df_full.tail(DEFAULT_PREVIEW_ROWS), width="stretch")
+                if preview_mode == "Latest raw rows":
+                    st.caption(
+                        f"Showing latest {min(DEFAULT_PREVIEW_ROWS, len(df_full))} "
+                        f"of {len(df_full)} total raw rows. "
+                        f"Full data is used for storage, features, modeling, and evaluation."
+                    )
+                    st.dataframe(df_full.tail(DEFAULT_PREVIEW_ROWS), width="stretch")
+                else:
+                    label = "aggregated" if disp_summary["display_mode"] == "aggregated" else "raw"
+                    st.caption(
+                        f"Showing {len(df_chart)} {label} chart candles. "
+                        f"These are for display only — modeling uses the full dataset."
+                    )
+                    st.dataframe(df_chart, width="stretch")
         else:
             if fetch_mode == "Recent Bars":
                 st.info("Click 'Fetch OHLCV' to load market data.")
@@ -372,12 +420,17 @@ with tab_local:
         df_full = st.session_state["local_df"]
 
         st.caption("**Chart Display Controls**")
+        st.caption(
+            "Select a narrower time range to see finer-grained candles. "
+            "The full dataset is always used for storage, features, and modeling."
+        )
         loc_col1, loc_col2 = st.columns(2)
         with loc_col1:
             local_chart_range = st.selectbox(
                 "Time Range",
-                ["Full range", "Last 7 days", "Last 30 days",
-                 "Last 90 days", "Custom range"],
+                ["Full range", "Last 1 day", "Last 7 days", "Last 30 days",
+                 "Last 90 days", "Last 180 days", "Last 365 days",
+                 "Custom range"],
                 key="local_chart_range",
             )
         with loc_col2:
@@ -388,20 +441,38 @@ with tab_local:
                 key="local_max_candles",
             )
 
-        now_utc = pd.Timestamp.now(tz="utc")
-        if local_chart_range == "Last 7 days":
-            df_view_local = filter_by_time_range(
-                df_full, start=now_utc - pd.Timedelta(days=7), end=now_utc
+        # Custom range date pickers
+        local_custom_start = None
+        local_custom_end = None
+        if local_chart_range == "Custom range":
+            from datetime import datetime, timezone
+
+            ref_max = df_full["timestamp"].max()
+            ref_min = df_full["timestamp"].min()
+            lc1, lc2 = st.columns(2)
+            with lc1:
+                local_custom_start = st.date_input(
+                    "Start date",
+                    value=ref_min.date() if pd.notna(ref_min) else datetime.now(timezone.utc).date(),
+                    key="local_custom_start",
+                )
+            with lc2:
+                local_custom_end = st.date_input(
+                    "End date",
+                    value=ref_max.date() if pd.notna(ref_max) else datetime.now(timezone.utc).date(),
+                    key="local_custom_end",
+                )
+            local_custom_start = pd.Timestamp(local_custom_start).tz_localize("utc") if local_custom_start else None
+            local_custom_end = pd.Timestamp(local_custom_end).tz_localize("utc") + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1) if local_custom_end else None
+
+        # Filter by chart range -> df_view
+        try:
+            df_view_local = filter_ohlcv_by_chart_range(
+                df_full, local_chart_range,
+                custom_start=local_custom_start, custom_end=local_custom_end,
             )
-        elif local_chart_range == "Last 30 days":
-            df_view_local = filter_by_time_range(
-                df_full, start=now_utc - pd.Timedelta(days=30), end=now_utc
-            )
-        elif local_chart_range == "Last 90 days":
-            df_view_local = filter_by_time_range(
-                df_full, start=now_utc - pd.Timedelta(days=90), end=now_utc
-            )
-        else:
+        except ValueError as exc:
+            st.error(str(exc))
             df_view_local = df_full
 
         local_display = prepare_candlestick_display_data(
@@ -416,23 +487,41 @@ with tab_local:
         )
         st.plotly_chart(fig, width="stretch")
 
-        st.caption(
-            f"Full: {local_summary['full_rows']} rows  |  "
-            f"View: {local_summary['view_rows']} rows  |  "
-            f"Displayed: {local_summary['displayed_candles']} candles  |  "
-            f"Mode: {local_summary['display_mode']}"
-            + (
-                f"  |  ~{local_summary['approx_bars_per_candle']} bars/candle"
-                if local_summary['approx_bars_per_candle'] else ""
+        # Display summary
+        st.divider()
+        st.caption("**Display Summary**")
+        ls1, ls2, ls3, ls4 = st.columns(4)
+        ls1.caption(f"Full dataset: {local_summary['full_rows']} rows")
+        ls2.caption(f"Selected range: {local_summary['view_rows']} rows")
+        ls3.caption(f"Displayed candles: {local_summary['displayed_candles']}")
+        ls4.caption(f"Mode: {local_summary['display_mode']}")
+
+        if local_summary["approx_bars_per_candle"]:
+            st.caption(
+                f"~{local_summary['approx_bars_per_candle']} raw bars per displayed candle. "
+                f"To see finer-grained candles, select a narrower time range."
             )
-        )
 
         with st.expander("Data Preview"):
-            st.caption(
-                f"Showing latest {min(DEFAULT_PREVIEW_ROWS, len(df_full))} "
-                f"of {len(df_full)} total rows."
+            preview_mode = st.radio(
+                "Preview Mode",
+                ["Latest raw rows", "Current chart candles"],
+                horizontal=True,
+                key="local_preview_mode",
             )
-            st.dataframe(df_full.tail(DEFAULT_PREVIEW_ROWS), width="stretch")
+            if preview_mode == "Latest raw rows":
+                st.caption(
+                    f"Showing latest {min(DEFAULT_PREVIEW_ROWS, len(df_full))} "
+                    f"of {len(df_full)} total raw rows."
+                )
+                st.dataframe(df_full.tail(DEFAULT_PREVIEW_ROWS), width="stretch")
+            else:
+                label = "aggregated" if local_summary["display_mode"] == "aggregated" else "raw"
+                st.caption(
+                    f"Showing {len(local_chart_df)} {label} chart candles. "
+                    f"These are for display only — modeling uses the full dataset."
+                )
+                st.dataframe(local_chart_df, width="stretch")
 
 # ---------------------------------------------------------------------------
 # Tab 3: Data Quality
