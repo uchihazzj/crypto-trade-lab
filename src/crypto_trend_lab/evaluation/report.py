@@ -124,6 +124,7 @@ def compare_baselines_and_models(
     test_size: int | float = 0.2,
     feature_columns: list[str] | None = None,
     include_tabular: bool = True,
+    model_names: list[str] | None = None,
 ) -> dict:
     """Run baselines and tabular models on a chronological split.
 
@@ -141,6 +142,9 @@ def compare_baselines_and_models(
         Feature columns to use. If None, auto-detected from *df*.
     include_tabular : bool
         If True, also run Ridge/Logistic/LightGBM models.
+    model_names : list[str] or None
+        If provided, run only models whose display names are in this list.
+        If None, run all applicable models.
 
     Returns
     -------
@@ -196,6 +200,8 @@ def compare_baselines_and_models(
     predictions_list = []
 
     for name, model in _build_baselines(task_type):
+        if model_names and name not in model_names:
+            continue
         result = evaluate_model(
             model, name, X_train, y_train, X_test, y_test, task_type
         )
@@ -211,6 +217,8 @@ def compare_baselines_and_models(
     # Run tabular models
     if include_tabular:
         for name, model in _build_tabular_models(task_type):
+            if model_names and name not in model_names:
+                continue
             result = evaluate_model(
                 model, name, X_train, y_train, X_test, y_test, task_type
             )

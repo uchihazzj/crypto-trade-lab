@@ -89,6 +89,22 @@ config = load_config()
 EXCHANGES = list(config["exchanges"].keys())
 TIMEFRAMES = config["timeframes"]
 
+
+def _clear_downstream_state() -> None:
+    """Clear state that depends on upstream OHLCV source data.
+
+    When fetched/local data changes, previously built features and
+    evaluation results are stale and must be invalidated.
+    """
+    for key in (
+        "features_df",
+        "eval_result",
+        "full_report",
+        "forecast_result",
+        "forecast_path_result",
+    ):
+        st.session_state.pop(key, None)
+
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
@@ -169,6 +185,7 @@ with tab_fetch:
                             if len(df) > limit:
                                 df = df.iloc[-limit:].reset_index(drop=True)
 
+                        _clear_downstream_state()
                         st.session_state["fetch_df"] = df
                         st.session_state["fetch_source"] = "fetched"
                         st.session_state["fetch_requested"] = limit
@@ -210,6 +227,7 @@ with tab_fetch:
                             exchange, symbol, timeframe,
                             start=start_dt, end=end_dt,
                         )
+                        _clear_downstream_state()
                         st.session_state["fetch_df"] = df
                         st.session_state["fetch_source"] = "fetched"
                         st.session_state["fetch_requested"] = None
@@ -413,6 +431,7 @@ with tab_local:
                     st.warning("No local data found for these parameters.")
                     st.session_state["local_df"] = pd.DataFrame()
                 else:
+                    _clear_downstream_state()
                     st.session_state["local_df"] = df
                     st.session_state["fetch_source"] = "local"
                     st.success(f"Loaded {len(df)} bars")
@@ -1128,7 +1147,7 @@ with tab_models:
                         "Model", all_models, key="detail_model"
                     )
 
-                # Re-run the single model to get predictions for charts
+                # Re-run the selected model for detail charts
                 target_col = get_target_column(detail_tt, detail_h)
                 if target_col in df_eval.columns:
                     detail_result = compare_baselines_and_models(
@@ -1137,11 +1156,9 @@ with tab_models:
                         horizon=detail_h,
                         test_size=full_test_pct,
                         include_tabular=True,
+                        model_names=[detail_model],
                     )
                     detail_preds = detail_result["predictions"]
-                    detail_preds = detail_preds[
-                        detail_preds["model_name"] == detail_model
-                    ]
 
                     if not detail_preds.empty:
                         chart_col1, chart_col2 = st.columns(2)

@@ -74,9 +74,9 @@ def save_ohlcv_parquet(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if path.exists() and layer == "raw":
-        logger.info(
-            f"Raw data already exists at {path}. "
-            f"Use layer='processed' or delete the file to overwrite."
+        logger.warning(
+            f"Raw data already exists at {path} — overwriting. "
+            f"Use layer='processed' to preserve raw data."
         )
 
     df_sorted = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last")
@@ -323,7 +323,12 @@ def save_forecast_parquet(
     path = _build_forecast_path(exchange, symbol, timeframe, model_name, target_column)
     path.parent.mkdir(parents=True, exist_ok=True)
     if "timestamp" in df.columns:
-        df = df.sort_values("timestamp")
+        dup_subset = ["timestamp"]
+        if "model_name" in df.columns:
+            dup_subset.append("model_name")
+        df = df.sort_values("timestamp").drop_duplicates(
+            subset=dup_subset, keep="last"
+        )
     df.to_parquet(path, index=False)
     logger.info(f"Saved {len(df)} forecast rows to {path}")
     return path
