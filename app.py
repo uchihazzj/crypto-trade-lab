@@ -20,11 +20,18 @@ from src.crypto_trend_lab.features.pipeline import (
     get_target_columns,
     get_technical_feature_columns,
 )
+from src.crypto_trend_lab.evaluation.report import compare_baselines_and_models
+from src.crypto_trend_lab.models.dataset import (
+    get_default_feature_columns,
+    get_target_column,
+)
+from src.crypto_trend_lab.models.tabular import _HAS_LIGHTGBM
 from src.crypto_trend_lab.storage.parquet import (
     load_features_parquet,
     load_ohlcv_parquet,
     save_features_parquet,
     save_ohlcv_parquet,
+    save_predictions_parquet,
 )
 from src.crypto_trend_lab.validation.quality import check_ohlcv_quality
 from src.crypto_trend_lab.visualization.charts import candlestick_chart
@@ -82,8 +89,8 @@ limit = st.sidebar.slider("Bars to fetch", min_value=50, max_value=1000, value=5
 # Tabs
 # ---------------------------------------------------------------------------
 
-tab_fetch, tab_local, tab_quality, tab_features = st.tabs(
-    ["Fetch & Chart", "Local Storage", "Data Quality", "Feature Preview"]
+tab_fetch, tab_local, tab_quality, tab_features, tab_models = st.tabs(
+    ["Fetch & Chart", "Local Storage", "Data Quality", "Feature Preview", "Model Evaluation"]
 )
 
 # ---------------------------------------------------------------------------
@@ -338,3 +345,224 @@ with tab_features:
                     st.dataframe(df_feat.tail(50), width="stretch")
     else:
         st.info("Load or fetch OHLCV data first, then run the feature pipeline.")
+
+# ---------------------------------------------------------------------------
+# Tab 5: Model Evaluation
+# ---------------------------------------------------------------------------
+
+with tab_models:
+    st.subheader("Model Evaluation")
+    st.caption(
+        "Chronological train/test evaluation of baseline and tabular models. "
+        "All results are experimental research signals, not investment advice."
+    )
+
+    # --- Data source ---
+    eval_source = st.radio(
+        "Data Source",
+        ["Features DataFrame", "Saved Features"],
+        horizontal=True,
+        key="eval_source",
+    )
+
+    df_eval: pd.DataFrame | None = None
+
+    if eval_source == "Features DataFrame":
+        if "features_df" in st.session_state and not st.session_state["features_df"].empty:
+            df_eval = st.session_state["features_df"]
+        else:
+            st.warning("No features data. Run the feature pipeline in 'Feature Preview' tab first.")
+    else:
+        try:
+            df_eval = load_features_parquet(exchange, symbol, timeframe)
+            if df_eval.empty:
+                st.warning("No saved features found for this symbol/timeframe.")
+        except Exception as exc:
+            st.error(f"Load failed: {exc}")
+
+    if df_eval is not None and not df_eval.empty:
+        # --- Controls ---
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            task_type = st.selectbox(
+                "Task Type",
+                ["regression", "classification"],
+                index=0,
+                help="Regression predicts log returns; classification predicts direction.",
+            )
+
+        with col2:
+            horizon = st.selectbox(
+                "Horizon",
+                [1, 4, 24],
+                index=0,
+                help="Forecast horizon in bars (1h each).",
+            )
+
+        with col3:
+            test_pct = st.slider(
+                "Test Size (%)",
+                min_value=10,
+                max_value=50,
+                value=20,
+                step=5,
+                help="Percentage of most recent data held out for testing.",
+            ) / 100.0
+
+        with col4:
+            include_tabular = st.checkbox(
+                "Include Tabular Models",
+                value=True,
+                help="Run Ridge/Logistic Regression and LightGBM if available.",
+            )
+
+        target_col = get_target_column(task_type, horizon)
+        feature_cols = get_default_feature_columns(df_eval)
+
+        # --- Info ---
+        st.divider()
+        st.caption(f"Target: **{target_col}**")
+        st.caption(f"Feature columns ({len(feature_cols)}): {', '.join(feature_cols[:10])}{'...' if len(feature_cols) > 10 else ''}")
+
+        if not _HAS_LIGHTGBM:
+            st.info("LightGBM is not installed. LightGBM models will be skipped.")
+
+        # --- Run evaluation ---
+        if st.button("Run Evaluation", type="primary", width="stretch"):
+            with st.spinner(f"Evaluating {task_type} models for horizon {horizon}..."):
+                try:
+                    result = compare_baselines_and_models(
+                        df_eval,
+                        task_type=task_type,
+                        horizon=horizon,
+                        test_size=test_pct,
+                        include_tabular=include_tabular,
+                    )
+                    st.session_state["eval_result"] = result
+                    st.success(
+                        f"Evaluated {len(result['metrics_table'])} models "
+                        f"({len(result['predictions'])} test predictions)"
+                    )
+                except Exception as exc:
+                    st.error(f"Evaluation failed: {exc}")
+
+        # --- Results ---
+        if "eval_result" in st.session_state:
+            result = st.session_state["eval_result"]
+
+            st.divider()
+            st.subheader("Train / Test Dates")
+
+            c1, c2 = st.columns(2)
+            c1.caption(
+                f"Train: {result['train_dates']['start']} → {result['train_dates']['end']}"
+            )
+            c2.caption(
+                f"Test: {result['test_dates']['start']} → {result['test_dates']['end']}"
+            )
+
+            st.divider()
+            st.subheader("Metrics Comparison")
+
+            metrics_df = result["metrics_table"]
+            st.dataframe(
+                metrics_df.set_index("model_name"),
+                width="stretch",
+            )
+
+            st.divider()
+            st.subheader("Predictions: y_true vs y_pred")
+
+            predictions = result["predictions"]
+            model_names = predictions["model_name"].unique()
+
+            selected_model = st.selectbox(
+                "Model",
+                model_names,
+                index=0,
+                key="eval_model_select",
+            )
+
+            pred_subset = predictions[predictions["model_name"] == selected_model]
+
+            import plotly.graph_objects as go
+
+            fig = go.Figure()
+
+            if task_type == "regression":
+                fig.add_trace(
+                    go.Scatter(
+                        x=pred_subset["timestamp"],
+                        y=pred_subset["y_true"],
+                        mode="lines+markers",
+                        name="Actual (y_true)",
+                        marker=dict(size=4),
+                    )
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=pred_subset["timestamp"],
+                        y=pred_subset["y_pred"],
+                        mode="lines+markers",
+                        name="Predicted (y_pred)",
+                        marker=dict(size=4),
+                    )
+                )
+            else:
+                # Classification: show probability if available, otherwise class overlay
+                fig.add_trace(
+                    go.Scatter(
+                        x=pred_subset["timestamp"],
+                        y=pred_subset["y_true"],
+                        mode="lines+markers",
+                        name="Actual Direction",
+                        marker=dict(size=4),
+                    )
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=pred_subset["timestamp"],
+                        y=pred_subset["y_pred"],
+                        mode="markers",
+                        name="Predicted Direction",
+                        marker=dict(size=6, symbol="x"),
+                    )
+                )
+                if "y_prob" in pred_subset.columns:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=pred_subset["timestamp"],
+                            y=pred_subset["y_prob"],
+                            mode="lines",
+                            name="Predicted Probability",
+                            line=dict(dash="dot"),
+                        )
+                    )
+
+            fig.update_layout(
+                title=f"{selected_model} — {target_col}",
+                xaxis_title="Time (UTC)",
+                yaxis_title=target_col,
+                template="plotly_dark",
+                height=450,
+            )
+            st.plotly_chart(fig, width="stretch")
+
+            st.divider()
+            st.subheader("Save Predictions")
+
+            if st.button("Save Predictions to Parquet", width="stretch"):
+                pred_to_save = predictions[predictions["model_name"] == selected_model]
+                path = save_predictions_parquet(
+                    pred_to_save,
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    model_name=selected_model,
+                    target_column=target_col,
+                )
+                st.success(f"Saved {len(pred_to_save)} predictions to {path}")
+
+            with st.expander("Prediction Data Preview"):
+                st.dataframe(predictions.tail(50), width="stretch")

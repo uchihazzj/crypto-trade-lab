@@ -61,13 +61,15 @@ crypto-trend-lab/
     validation/       # Data quality checks
     visualization/    # Plotly charts
     features/         # Technical indicators and prediction targets
+    evaluation/       # Chronological splits, metrics, model comparison
+    models/           # Baseline and tabular models
     utils/            # Shared helpers
   tests/              # Test suite
   data/               # Local data directory (git-ignored)
     raw/              # Raw OHLCV data
     processed/        # Processed OHLCV data
-    features/         # Feature DataFrames (future)
-    predictions/      # Model prediction outputs (future)
+    features/         # Feature DataFrames
+    predictions/      # Model prediction outputs
 ```
 
 ## Running Tests
@@ -135,8 +137,73 @@ The Streamlit dashboard includes a Feature Preview tab that allows you to:
 6. Save the feature table to local Parquet.
 7. View line charts for close, ma_25, rsi_14, macd, and bollinger_width.
 
-No model training is implemented yet. Model outputs and trading logic
-remain out of scope.
+## Milestone 3 Scope
+
+- [x] Chronological train/test split and walk-forward split (no shuffling).
+- [x] Regression metrics (MAE, RMSE, directional accuracy, Spearman).
+- [x] Classification metrics (accuracy, balanced accuracy, precision, recall, F1, AUC).
+- [x] Baseline models: zero return, last return, moving average, momentum direction, majority class.
+- [x] Tabular models: Ridge regression, Logistic regression, LightGBM (if installed).
+- [x] Modeling dataset helpers (feature column selection, target column lookup, NaN-aware preparation).
+- [x] Model evaluation workflow with chronological splitting.
+- [x] Prediction Parquet storage with deterministic paths.
+- [x] Model Evaluation tab in Streamlit dashboard.
+- [x] Unit tests for splits, metrics, baselines, dataset, and evaluation.
+- [ ] Macro indicators, sequence models, and deep learning (not yet implemented).
+
+## Model Evaluation
+
+### Baselines
+
+Simple models that any useful predictive model must beat:
+
+- **Regression**: Zero Return (always 0), Last Return (most recent), Moving Average (training mean).
+- **Classification**: Momentum Direction (sign of last return), Majority Class (training mode).
+
+### Tabular Models
+
+- **Ridge Regression** for `target_return_h` — scaled features, L2 penalty.
+- **Logistic Regression** for `target_direction_h` — scaled features, balanced class weights.
+- **LightGBM Regressor / Classifier** — gradient-boosted trees (if installed).
+
+All models use scikit-learn Pipelines where applicable. Scalers are fit only on
+the training set and applied to the test set — no future leakage.
+
+### Chronological Validation
+
+All evaluation uses chronological splits:
+
+- `chronological_train_test_split`: train on earlier data, test on later data.
+- `walk_forward_split`: expanding or rolling window folds.
+
+Random shuffling is never used. Future rows never leak into training.
+
+### How to Use the Model Evaluation Tab
+
+1. Build features in the Feature Preview tab (or load saved features).
+2. Navigate to the Model Evaluation tab.
+3. Select:
+   - Task type: regression (predicts return magnitude) or classification (predicts direction).
+   - Horizon: 1, 4, or 24 bars ahead.
+   - Test size: percentage of data held out.
+   - Whether to include tabular models.
+4. Click Run Evaluation.
+5. Inspect the metrics comparison table and y_true vs y_pred chart.
+6. Optionally save predictions to local Parquet.
+
+### Prediction Storage
+
+Prediction results are saved to:
+
+```
+data/predictions/exchange=<exchange>/symbol=<symbol>/timeframe=<timeframe>/model=<model_name>/target=<target_column>/predictions.parquet
+```
+
+### Non-Trading Warning
+
+All model outputs are **experimental research signals**. They are not investment
+advice. Crypto markets are noisy, non-stationary, and high-risk. Past performance
+in backtests does not guarantee future results.
 
 ## Data Sources (Read-Only)
 

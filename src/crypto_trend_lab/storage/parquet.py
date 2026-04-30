@@ -177,3 +177,89 @@ def load_features_parquet(
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     logger.info(f"Loaded {len(df)} feature rows from {path}")
     return df
+
+
+def _build_predictions_path(
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    model_name: str,
+    target_column: str,
+) -> Path:
+    """Build a deterministic Parquet path for prediction data.
+
+    Pattern: data/predictions/exchange={exchange}/symbol={safe_symbol}/timeframe={timeframe}/model={model_name}/target={target_column}/predictions.parquet
+    """
+    safe_symbol = symbol_to_safe(symbol)
+    safe_model = model_name.replace(" ", "_").lower()
+    return (
+        DATA_DIR
+        / "predictions"
+        / f"exchange={exchange}"
+        / f"symbol={safe_symbol}"
+        / f"timeframe={timeframe}"
+        / f"model={safe_model}"
+        / f"target={target_column}"
+        / "predictions.parquet"
+    )
+
+
+def save_predictions_parquet(
+    df: pd.DataFrame,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    model_name: str,
+    target_column: str,
+) -> Path:
+    """Save a predictions DataFrame to local Parquet storage.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Predictions DataFrame with columns: timestamp, y_true, y_pred, model_name, target_column.
+    exchange : str
+        Exchange ID.
+    symbol : str
+        Trading symbol.
+    timeframe : str
+        OHLCV timeframe.
+    model_name : str
+        Model display name.
+    target_column : str
+        Target column name (e.g. 'target_return_1').
+
+    Returns
+    -------
+    Path
+        Path to the saved Parquet file.
+    """
+    path = _build_predictions_path(exchange, symbol, timeframe, model_name, target_column)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df_sorted = df.sort_values("timestamp").drop_duplicates(subset=["timestamp", "model_name"], keep="last")
+    df_sorted.to_parquet(path, index=False)
+    logger.info(f"Saved {len(df_sorted)} prediction rows to {path}")
+    return path
+
+
+def load_predictions_parquet(
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    model_name: str,
+    target_column: str,
+) -> pd.DataFrame:
+    """Load a predictions DataFrame from local Parquet storage.
+
+    Returns an empty DataFrame if the file does not exist.
+    """
+    path = _build_predictions_path(exchange, symbol, timeframe, model_name, target_column)
+    if not path.exists():
+        logger.warning(f"File not found: {path}")
+        return pd.DataFrame()
+
+    df = pd.read_parquet(path)
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    logger.info(f"Loaded {len(df)} prediction rows from {path}")
+    return df
