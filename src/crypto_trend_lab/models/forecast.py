@@ -12,15 +12,24 @@ import pandas as pd
 from src.crypto_trend_lab.evaluation.forecast import generate_future_timestamps
 from src.crypto_trend_lab.features.target import add_dense_return_targets
 from src.crypto_trend_lab.models.baseline import (
+    HistoricalMeanReturnBaseline,
     LastReturnBaseline,
     MovingAverageReturnBaseline,
     ZeroReturnBaseline,
 )
 from src.crypto_trend_lab.models.dataset import get_default_feature_columns
 from src.crypto_trend_lab.models.tabular import (
+    _HAS_CATBOOST,
     _HAS_LIGHTGBM,
+    _HAS_XGBOOST,
+    CatBoostRegressor,
+    ElasticNetRegressionModel,
+    ExtraTreesRegressionModel,
+    HistGradientBoostingRegressionModel,
     LightGBMRegressor,
+    RandomForestRegressionModel,
     RidgeRegressionModel,
+    XGBoostRegressor,
 )
 
 # Regression model name → constructor mapping.
@@ -29,10 +38,19 @@ _REGRESSION_MODELS: dict[str, type] = {
     "Zero Return": ZeroReturnBaseline,
     "Last Return": LastReturnBaseline,
     "Moving Average": MovingAverageReturnBaseline,
+    "Historical Mean Return": HistoricalMeanReturnBaseline,
     "Ridge": RidgeRegressionModel,
+    "ElasticNet": ElasticNetRegressionModel,
+    "Random Forest": RandomForestRegressionModel,
+    "Extra Trees": ExtraTreesRegressionModel,
+    "HistGradientBoosting": HistGradientBoostingRegressionModel,
 }
 if _HAS_LIGHTGBM:
     _REGRESSION_MODELS["LightGBM"] = LightGBMRegressor
+if _HAS_XGBOOST:
+    _REGRESSION_MODELS["XGBoost"] = XGBoostRegressor
+if _HAS_CATBOOST:
+    _REGRESSION_MODELS["CatBoost"] = CatBoostRegressor
 
 
 def run_dense_direct_forecast(

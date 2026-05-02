@@ -11,7 +11,7 @@ import pandas as pd
 
 from src.crypto_trend_lab.evaluation.report import compare_baselines_and_models
 from src.crypto_trend_lab.models.dataset import get_default_feature_columns, get_target_column
-from src.crypto_trend_lab.models.tabular import _HAS_LIGHTGBM
+from src.crypto_trend_lab.models.tabular import _HAS_CATBOOST, _HAS_LIGHTGBM, _HAS_XGBOOST
 
 _SUPPORTED_HORIZONS = (1, 4, 24)
 _SUPPORTED_TASK_TYPES = ("regression", "classification")
@@ -43,6 +43,7 @@ def run_full_evaluation_report(
     task_types: tuple[str, ...] = _SUPPORTED_TASK_TYPES,
     test_size: int | float = 0.2,
     feature_columns: list[str] | None = None,
+    include_trees: bool = False,
 ) -> dict:
     """Run baselines and tabular models for every task × horizon combination.
 
@@ -58,6 +59,9 @@ def run_full_evaluation_report(
         Test hold-out size passed to ``chronological_train_test_split``.
     feature_columns : list[str] or None
         Feature columns. If None, auto-detected from *df*.
+    include_trees : bool
+        If True, include tree ensembles and optional external models
+        (XGBoost, CatBoost if installed). Default False for speed.
 
     Returns
     -------
@@ -84,7 +88,7 @@ def run_full_evaluation_report(
                     f"Target column {target_column!r} not in DataFrame. "
                     f"Run build_features() first."
                 )
-                for model_name in _expected_model_names(task_type):
+                for model_name in _expected_model_names(task_type, include_trees):
                     skipped.append(
                         _build_skipped_row(task_type, horizon, model_name, reason)
                     )
@@ -100,11 +104,12 @@ def run_full_evaluation_report(
                     test_size=test_size,
                     feature_columns=feature_columns,
                     include_tabular=True,
+                    include_trees=include_trees,
                 )
             except ValueError as exc:
                 # Missing target or insufficient data — skip all models
                 reason = str(exc)
-                for model_name in _expected_model_names(task_type):
+                for model_name in _expected_model_names(task_type, include_trees):
                     skipped.append(
                         _build_skipped_row(task_type, horizon, model_name, reason)
                     )
@@ -123,20 +128,25 @@ def run_full_evaluation_report(
                         test_size=test_size,
                         feature_columns=feature_columns,
                         include_tabular=False,
+                        include_trees=False,
                     )
                 except Exception:
-                    for model_name in _expected_model_names(task_type):
+                    for model_name in _expected_model_names(task_type, include_trees):
                         skipped.append(
                             _build_skipped_row(task_type, horizon, model_name, reason)
                         )
                     continue
 
-                for model_name in _expected_tabular_names(task_type):
+                for model_name in _expected_tabular_names(task_type, include_trees):
                     skipped.append(
                         _build_skipped_row(task_type, horizon, model_name, reason)
                     )
 
             successful += 1
+
+            # --- Collect per-model skipped entries from this run ---
+            for s in result.get("skipped", []):
+                skipped.append(s)
 
             # --- Collect results ---
             metrics_df = result["metrics_table"]
@@ -173,6 +183,9 @@ def run_full_evaluation_report(
         "successful": successful,
         "skipped": len(skipped),
         "lightgbm_available": _HAS_LIGHTGBM,
+        "xgboost_available": _HAS_XGBOOST,
+        "catboost_available": _HAS_CATBOOST,
+        "include_trees": include_trees,
     }
 
     return {
@@ -182,22 +195,41 @@ def run_full_evaluation_report(
     }
 
 
-def _expected_model_names(task_type: str) -> list[str]:
+def _expected_model_names(task_type: str, include_trees: bool = False) -> list[str]:
     """Model names that would be run for a task type (baselines + tabular)."""
     if task_type == "regression":
-        names = ["Zero Return", "Last Return", "Moving Average", "Ridge"]
+        names = ["Zero Return", "Last Return", "Moving Average",
+                 "Historical Mean Return", "Ridge", "ElasticNet"]
     else:
         names = ["Momentum Direction", "Majority Class", "Logistic Regression"]
     if _HAS_LIGHTGBM:
         names.append("LightGBM")
+    if include_trees:
+        if task_type == "regression":
+            names.extend(["Random Forest", "Extra Trees", "HistGradientBoosting"])
+        else:
+            names.extend(["Random Forest", "Extra Trees", "HistGradientBoosting"])
+        if _HAS_XGBOOST:
+            names.append("XGBoost")
+        if _HAS_CATBOOST:
+            names.append("CatBoost")
     return names
 
 
-def _expected_tabular_names(task_type: str) -> list[str]:
+def _expected_tabular_names(task_type: str, include_trees: bool = False) -> list[str]:
     """Only the tabular model names for a task type."""
-    names = ["Ridge"] if task_type == "regression" else ["Logistic Regression"]
+    names = ["Ridge", "ElasticNet"] if task_type == "regression" else ["Logistic Regression"]
     if _HAS_LIGHTGBM:
         names.append("LightGBM")
+    if include_trees:
+        if task_type == "regression":
+            names.extend(["Random Forest", "Extra Trees", "HistGradientBoosting"])
+        else:
+            names.extend(["Random Forest", "Extra Trees", "HistGradientBoosting"])
+        if _HAS_XGBOOST:
+            names.append("XGBoost")
+        if _HAS_CATBOOST:
+            names.append("CatBoost")
     return names
 
 

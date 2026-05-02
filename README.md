@@ -142,8 +142,8 @@ The Streamlit dashboard includes a Feature Preview tab that allows you to:
 - [x] Chronological train/test split and walk-forward split (no shuffling).
 - [x] Regression metrics (MAE, RMSE, directional accuracy, Spearman).
 - [x] Classification metrics (accuracy, balanced accuracy, precision, recall, F1, AUC).
-- [x] Baseline models: zero return, last return, moving average, momentum direction, majority class.
-- [x] Tabular models: Ridge regression, Logistic regression, LightGBM (if installed).
+- [x] Baseline models: zero return, last return, moving average, historical mean return, momentum direction, majority class.
+- [x] Tabular models: Ridge, ElasticNet, Logistic Regression, Random Forest, Extra Trees, HistGradientBoosting, LightGBM, XGBoost (optional), CatBoost (optional).
 - [x] Modeling dataset helpers (feature column selection, target column lookup, NaN-aware preparation).
 - [x] Model evaluation workflow with chronological splitting.
 - [x] Prediction Parquet storage with deterministic paths.
@@ -153,21 +153,72 @@ The Streamlit dashboard includes a Feature Preview tab that allows you to:
 
 ## Model Evaluation
 
-### Baselines
+### Baselines (Naive)
 
 Simple models that any useful predictive model must beat:
 
-- **Regression**: Zero Return (always 0), Last Return (most recent), Moving Average (training mean).
-- **Classification**: Momentum Direction (sign of last return), Majority Class (training mode).
+- **Regression**: Zero Return (always 0), Last Return (most recent), Moving Average
+  (training mean), Historical Mean Return (training mean — same behavior as Moving
+  Average but explicitly named for clarity).
+- **Classification**: Momentum Direction (sign of last return), Majority Class
+  (training mode).
 
 ### Tabular Models
 
+Tabular models are grouped into categories. By default, only linear models and
+LightGBM run — tree ensembles and external libraries are opt-in for speed.
+
+#### Linear Models
+
 - **Ridge Regression** for `target_return_h` — scaled features, L2 penalty.
-- **Logistic Regression** for `target_direction_h` — scaled features, balanced class weights.
-- **LightGBM Regressor / Classifier** — gradient-boosted trees (if installed).
+- **ElasticNet Regression** for `target_return_h` — scaled features, combined L1/L2
+  penalty (good for sparse feature selection).
+- **Logistic Regression** for `target_direction_h` — scaled features, balanced
+  class weights.
+
+#### Tree Ensembles (opt-in via "Include heavier tree ensemble baselines" checkbox)
+
+- **Random Forest** (200 estimators, `random_state=42`, `n_jobs=-1`) for regression
+  and classification. Balanced class weights for classification.
+- **Extra Trees** (200 estimators, `random_state=42`, `n_jobs=-1`) — randomized
+  split points, often faster than Random Forest.
+- **HistGradientBoosting** (200 iterations, `learning_rate=0.05`, `random_state=42`)
+  — sklearn's histogram-based gradient boosting, fast and memory-efficient.
+  Balanced class weights for classification.
+
+#### Optional External Libraries (included with tree ensembles if installed)
+
+- **LightGBM** — gradient-boosted trees (always shown when installed).
+- **XGBoost** (optional: `pip install xgboost`) — gradient boosting with L1/L2
+  regularization.
+- **CatBoost** (optional: `pip install catboost`) — gradient boosting with
+  built-in categorical feature handling.
+
+If XGBoost or CatBoost are not installed, they are silently skipped with a
+warning in the UI — no crash and no test failure.
 
 All models use scikit-learn Pipelines where applicable. Scalers are fit only on
 the training set and applied to the test set — no future leakage.
+
+### Model Comparison
+
+- All models are evaluated under **chronological split only** — no random
+  shuffling.
+- **Naive baselines must be beaten** before claiming any model has predictive
+  value. A tree ensemble that outperforms Ridge on a single test split does not
+  prove generalizable predictive power — it is a historical evaluation result.
+- Heavier models (tree ensembles, XGBoost, CatBoost) may overfit small datasets.
+  Always compare against simple baselines and Ridge/ElasticNet.
+- Results are **experimental research outputs**, not investment advice.
+
+### Performance Notes
+
+- Default Full Evaluation Report runs baselines + linear models + LightGBM —
+  typically fast even on large datasets.
+- Enabling tree ensembles adds ~6-10 models per task × horizon combination.
+  With XGBoost and CatBoost installed, this grows to ~8-12 models.
+- On datasets with >5000 rows, a runtime warning is shown when tree ensembles
+  are enabled.
 
 ### Chronological Validation
 

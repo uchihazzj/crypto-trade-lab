@@ -44,6 +44,23 @@ class MovingAverageReturnBaseline:
         return np.full(len(X), self.mean_, dtype=float)
 
 
+class HistoricalMeanReturnBaseline:
+    """Predict future return as the historical mean of training returns.
+
+    Identical in behavior to MovingAverageReturnBaseline but uses an
+    explicit name for clarity in evaluation reports.
+    """
+
+    def __init__(self) -> None:
+        self.mean_ = 0.0
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> None:
+        self.mean_ = float(np.mean(y))
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return np.full(len(X), self.mean_, dtype=float)
+
+
 class MomentumDirectionBaseline:
     """Predict direction as the sign of the last training return."""
 

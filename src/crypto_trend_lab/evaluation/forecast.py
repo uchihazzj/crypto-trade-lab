@@ -15,6 +15,7 @@ from src.crypto_trend_lab.evaluation.metrics import (
 )
 from src.crypto_trend_lab.evaluation.split import chronological_train_test_split
 from src.crypto_trend_lab.models.baseline import (
+    HistoricalMeanReturnBaseline,
     LastReturnBaseline,
     MajorityClassBaseline,
     MomentumDirectionBaseline,
@@ -26,11 +27,24 @@ from src.crypto_trend_lab.models.dataset import (
     get_target_column,
 )
 from src.crypto_trend_lab.models.tabular import (
+    _HAS_CATBOOST,
     _HAS_LIGHTGBM,
+    _HAS_XGBOOST,
+    CatBoostClassifier,
+    CatBoostRegressor,
+    ElasticNetRegressionModel,
+    ExtraTreesClassificationModel,
+    ExtraTreesRegressionModel,
+    HistGradientBoostingClassificationModel,
+    HistGradientBoostingRegressionModel,
     LightGBMClassifier,
     LightGBMRegressor,
     LogisticRegressionModel,
+    RandomForestClassificationModel,
+    RandomForestRegressionModel,
     RidgeRegressionModel,
+    XGBoostClassifier,
+    XGBoostRegressor,
 )
 
 # Maps model display names to constructors
@@ -38,17 +52,31 @@ _REGRESSION_MODELS: dict[str, type] = {
     "Zero Return": ZeroReturnBaseline,
     "Last Return": LastReturnBaseline,
     "Moving Average": MovingAverageReturnBaseline,
+    "Historical Mean Return": HistoricalMeanReturnBaseline,
     "Ridge": RidgeRegressionModel,
+    "ElasticNet": ElasticNetRegressionModel,
+    "Random Forest": RandomForestRegressionModel,
+    "Extra Trees": ExtraTreesRegressionModel,
+    "HistGradientBoosting": HistGradientBoostingRegressionModel,
 }
 _CLASSIFICATION_MODELS: dict[str, type] = {
     "Momentum Direction": MomentumDirectionBaseline,
     "Majority Class": MajorityClassBaseline,
     "Logistic Regression": LogisticRegressionModel,
+    "Random Forest": RandomForestClassificationModel,
+    "Extra Trees": ExtraTreesClassificationModel,
+    "HistGradientBoosting": HistGradientBoostingClassificationModel,
 }
 
 if _HAS_LIGHTGBM:
     _REGRESSION_MODELS["LightGBM"] = LightGBMRegressor
     _CLASSIFICATION_MODELS["LightGBM"] = LightGBMClassifier
+if _HAS_XGBOOST:
+    _REGRESSION_MODELS["XGBoost"] = XGBoostRegressor
+    _CLASSIFICATION_MODELS["XGBoost"] = XGBoostClassifier
+if _HAS_CATBOOST:
+    _REGRESSION_MODELS["CatBoost"] = CatBoostRegressor
+    _CLASSIFICATION_MODELS["CatBoost"] = CatBoostClassifier
 
 
 def _extract_latest_close(df: pd.DataFrame) -> float | None:

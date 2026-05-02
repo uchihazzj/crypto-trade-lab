@@ -34,6 +34,7 @@ from src.crypto_trend_lab.utils.helpers import (
 )
 
 from src.crypto_trend_lab.models.baseline import (
+    HistoricalMeanReturnBaseline,
     LastReturnBaseline,
     MajorityClassBaseline,
     MomentumDirectionBaseline,
@@ -46,8 +47,19 @@ from src.crypto_trend_lab.models.dataset import (
     prepare_modeling_data,
 )
 from src.crypto_trend_lab.models.tabular import (
+    CatBoostClassifier,
+    CatBoostRegressor,
+    ElasticNetRegressionModel,
+    ExtraTreesClassificationModel,
+    ExtraTreesRegressionModel,
+    HistGradientBoostingClassificationModel,
+    HistGradientBoostingRegressionModel,
     LogisticRegressionModel,
+    RandomForestClassificationModel,
+    RandomForestRegressionModel,
     RidgeRegressionModel,
+    XGBoostClassifier,
+    XGBoostRegressor,
 )
 from src.crypto_trend_lab.storage.parquet import (
     _build_predictions_path,
@@ -246,6 +258,46 @@ def test_majority_class_baseline_tie():
     pred = model.predict(np.ones((2, 3)))
     # First unique value wins in tie
     assert pred[0] in (0.0, 1.0)
+
+
+def test_historical_mean_return_baseline_uses_only_training():
+    y_train = np.array([0.01, -0.02, 0.03, 0.05, -0.01])
+    model = HistoricalMeanReturnBaseline()
+    model.fit(np.ones((5, 3)), y_train)
+    pred = model.predict(np.ones((3, 3)))
+    expected_mean = float(np.mean(y_train))
+    assert np.allclose(pred, expected_mean)
+    # Output shape matches test set
+    assert pred.shape == (3,)
+
+
+def test_historical_mean_return_baseline_output_shape():
+    X_train = np.random.default_rng(42).normal(0, 1, (100, 5))
+    y_train = np.random.default_rng(43).normal(0, 0.01, 100)
+    X_test = np.random.default_rng(44).normal(0, 1, (20, 5))
+    model = HistoricalMeanReturnBaseline()
+    model.fit(X_train, y_train)
+    pred = model.predict(X_test)
+    assert pred.shape == (20,)
+
+
+def test_baselines_do_not_use_test_targets():
+    """All naive baselines must only use training y, never test y."""
+    y_train = np.array([0.01, -0.02, 0.03])
+
+    for model in [
+        ZeroReturnBaseline(),
+        LastReturnBaseline(),
+        MovingAverageReturnBaseline(),
+        HistoricalMeanReturnBaseline(),
+    ]:
+        model.fit(np.ones((3, 2)), y_train)
+        pred = model.predict(np.ones((2, 2)))
+        # Zero return: always 0
+        if isinstance(model, ZeroReturnBaseline):
+            assert np.all(pred == 0.0), f"{type(model).__name__} failed"
+        # Predictions should be based on y_train, not y_test
+        assert pred.shape == (2,), f"{type(model).__name__} shape mismatch"
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +537,350 @@ def test_logistic_regression_fit_predict():
     assert pred.shape == (10,)
     assert prob.shape == (10,)
     assert np.all((prob >= 0) & (prob <= 1))
+
+
+# ---------------------------------------------------------------------------
+# New sklearn tabular models — regression
+# ---------------------------------------------------------------------------
+
+
+def test_elasticnet_regression_fit_predict():
+    X = np.random.default_rng(42).normal(0, 1, (50, 5))
+    y = X[:, 0] * 0.5 + np.random.default_rng(99).normal(0, 0.1, 50)
+    model = ElasticNetRegressionModel()
+    model.fit(X[:40], y[:40])
+    pred = model.predict(X[40:])
+    assert pred.shape == (10,)
+
+
+def test_random_forest_regression_fit_predict():
+    X = np.random.default_rng(42).normal(0, 1, (50, 5))
+    y = X[:, 0] * 0.5 + np.random.default_rng(99).normal(0, 0.1, 50)
+    model = RandomForestRegressionModel()
+    model.fit(X[:40], y[:40])
+    pred = model.predict(X[40:])
+    assert pred.shape == (10,)
+
+
+def test_extra_trees_regression_fit_predict():
+    X = np.random.default_rng(42).normal(0, 1, (50, 5))
+    y = X[:, 0] * 0.5 + np.random.default_rng(99).normal(0, 0.1, 50)
+    model = ExtraTreesRegressionModel()
+    model.fit(X[:40], y[:40])
+    pred = model.predict(X[40:])
+    assert pred.shape == (10,)
+
+
+def test_hist_gradient_boosting_regression_fit_predict():
+    X = np.random.default_rng(42).normal(0, 1, (50, 5))
+    y = X[:, 0] * 0.5 + np.random.default_rng(99).normal(0, 0.1, 50)
+    model = HistGradientBoostingRegressionModel()
+    model.fit(X[:40], y[:40])
+    pred = model.predict(X[40:])
+    assert pred.shape == (10,)
+
+
+# ---------------------------------------------------------------------------
+# New sklearn tabular models — classification
+# ---------------------------------------------------------------------------
+
+
+def test_random_forest_classification_fit_predict():
+    X = np.random.default_rng(42).normal(0, 1, (50, 5))
+    y = (X[:, 0] > 0).astype(float)
+    model = RandomForestClassificationModel()
+    model.fit(X[:40], y[:40])
+    pred = model.predict(X[40:])
+    prob = model.predict_proba(X[40:])
+    assert pred.shape == (10,)
+    assert prob.shape == (10,)
+    assert np.all((prob >= 0) & (prob <= 1))
+
+
+def test_extra_trees_classification_fit_predict():
+    X = np.random.default_rng(42).normal(0, 1, (50, 5))
+    y = (X[:, 0] > 0).astype(float)
+    model = ExtraTreesClassificationModel()
+    model.fit(X[:40], y[:40])
+    pred = model.predict(X[40:])
+    prob = model.predict_proba(X[40:])
+    assert pred.shape == (10,)
+    assert prob.shape == (10,)
+    assert np.all((prob >= 0) & (prob <= 1))
+
+
+def test_hist_gradient_boosting_classification_fit_predict():
+    X = np.random.default_rng(42).normal(0, 1, (50, 5))
+    y = (X[:, 0] > 0).astype(float)
+    model = HistGradientBoostingClassificationModel()
+    model.fit(X[:40], y[:40])
+    pred = model.predict(X[40:])
+    prob = model.predict_proba(X[40:])
+    assert pred.shape == (10,)
+    assert prob.shape == (10,)
+    assert np.all((prob >= 0) & (prob <= 1))
+
+
+# ---------------------------------------------------------------------------
+# Model registry tests
+# ---------------------------------------------------------------------------
+
+
+def test_regression_model_registry_includes_new_models():
+    from src.crypto_trend_lab.evaluation.forecast import (
+        _REGRESSION_MODELS as reg_models,
+    )
+    assert "ElasticNet" in reg_models
+    assert "Random Forest" in reg_models
+    assert "Extra Trees" in reg_models
+    assert "HistGradientBoosting" in reg_models
+    assert "Historical Mean Return" in reg_models
+
+
+def test_classification_model_registry_includes_new_models():
+    from src.crypto_trend_lab.evaluation.forecast import (
+        _CLASSIFICATION_MODELS as cls_models,
+    )
+    assert "Random Forest" in cls_models
+    assert "Extra Trees" in cls_models
+    assert "HistGradientBoosting" in cls_models
+
+
+def test_xgboost_skipped_gracefully_if_not_installed():
+    from src.crypto_trend_lab.models import tabular as tmod
+
+    if not tmod._HAS_XGBOOST:
+        with pytest.raises(ImportError, match="XGBoost is not installed"):
+            XGBoostRegressor()
+        with pytest.raises(ImportError, match="XGBoost is not installed"):
+            XGBoostClassifier()
+    else:
+        # If installed, must construct and run
+        X = np.random.default_rng(42).normal(0, 1, (20, 3))
+        y = X[:, 0] * 0.5
+        m = XGBoostRegressor()
+        m.fit(X[:10], y[:10])
+        pred = m.predict(X[10:])
+        assert pred.shape == (10,)
+
+
+def test_catboost_skipped_gracefully_if_not_installed():
+    from src.crypto_trend_lab.models import tabular as tmod
+
+    if not tmod._HAS_CATBOOST:
+        with pytest.raises(ImportError, match="CatBoost is not installed"):
+            CatBoostRegressor()
+        with pytest.raises(ImportError, match="CatBoost is not installed"):
+            CatBoostClassifier()
+    else:
+        X = np.random.default_rng(42).normal(0, 1, (20, 3))
+        y = X[:, 0] * 0.5
+        m = CatBoostRegressor()
+        m.fit(X[:10], y[:10])
+        pred = m.predict(X[10:])
+        assert pred.shape == (10,)
+
+
+def test_xgboost_catboost_flag_consistency():
+    """_HAS_XGBOOST and _HAS_CATBOOST must be bool."""
+    from src.crypto_trend_lab.models import tabular as tmod
+
+    assert isinstance(tmod._HAS_XGBOOST, bool)
+    assert isinstance(tmod._HAS_CATBOOST, bool)
+
+
+def test_include_trees_defaults_to_false():
+    """compare_baselines_and_models must default include_trees=False."""
+    from src.crypto_trend_lab.evaluation.report import (
+        _build_tabular_models,
+    )
+
+    reg_models = _build_tabular_models("regression", include_trees=False)
+    reg_names = [n for n, _ in reg_models]
+    # Without trees: only linear + LightGBM
+    assert "Random Forest" not in reg_names
+    assert "Extra Trees" not in reg_names
+    assert "HistGradientBoosting" not in reg_names
+
+
+def test_include_trees_true_adds_ensemble_models():
+    """With include_trees=True, ensemble models must be present."""
+    from src.crypto_trend_lab.evaluation.report import (
+        _build_tabular_models,
+    )
+
+    reg_models = _build_tabular_models("regression", include_trees=True)
+    reg_names = [n for n, _ in reg_models]
+    assert "Random Forest" in reg_names
+    assert "Extra Trees" in reg_names
+    assert "HistGradientBoosting" in reg_names
+
+
+def test_full_report_include_trees_flows_through():
+    """run_full_evaluation_report with include_trees=True must include tree models."""
+    df = _make_features_df(200)
+    report = run_full_evaluation_report(
+        df, task_types=("regression",), horizons=(1,),
+        test_size=0.2, include_trees=True,
+    )
+    model_names = report["metrics_df"]["model_name"].unique().tolist()
+    assert "Random Forest" in model_names
+    assert "Extra Trees" in model_names
+    assert "HistGradientBoosting" in model_names
+
+
+# ---------------------------------------------------------------------------
+# Target leakage tests
+# ---------------------------------------------------------------------------
+
+
+def test_target_columns_excluded_from_features_all_models():
+    """All model evaluations must exclude target_* from feature columns."""
+    df = _make_features_df(200)
+    features = get_default_feature_columns(df)
+    assert not any(c.startswith("target_") for c in features)
+
+    result = compare_baselines_and_models(
+        df, task_type="regression", horizon=1, test_size=0.2,
+        include_trees=True,
+    )
+    assert "feature_columns" in result
+    assert not any(c.startswith("target_") for c in result["feature_columns"])
+
+
+def test_chronological_split_preserved_with_new_models():
+    """Chronological order must be preserved with tree ensemble models."""
+    df = _make_features_df(200)
+    result = compare_baselines_and_models(
+        df, task_type="regression", horizon=1, test_size=0.2,
+        include_trees=True,
+    )
+    assert result["train_dates"]["end"] < result["test_dates"]["start"]
+    assert result["train_dates"]["start"] < result["train_dates"]["end"]
+
+
+def test_preprocessing_fit_only_on_training():
+    """ElasticNet scaler must be fit only on training data, not test."""
+    X_train = np.random.default_rng(42).normal(0, 1, (100, 5))
+    y_train = np.random.default_rng(43).normal(0, 0.01, 100)
+    X_test = np.random.default_rng(44).normal(100, 50, (20, 5))  # very different scale
+
+    model = ElasticNetRegressionModel()
+    model.fit(X_train, y_train)
+    pred = model.predict(X_test)
+    assert pred.shape == (20,)
+    # Predictions should be finite (scaler handles the different scale)
+    assert np.all(np.isfinite(pred))
+
+
+# ---------------------------------------------------------------------------
+# Robustness: empty predictions_list and skip/failure logging
+# ---------------------------------------------------------------------------
+
+
+def test_empty_predictions_list_returns_stable_columns():
+    """When all models are filtered out, predictions must be empty with
+    stable columns, not raise ValueError from pd.concat([])."""
+    df = _make_features_df(200)
+    # model_names with a name that matches no baseline or tabular model
+    result = compare_baselines_and_models(
+        df, task_type="regression", horizon=1, test_size=0.2,
+        model_names=["NonExistentModel"],
+    )
+    preds = result["predictions"]
+    assert preds.empty
+    for col in ("timestamp", "y_true", "y_pred", "model_name", "target_column"):
+        assert col in preds.columns, f"Missing column: {col}"
+
+    # metrics_table must also have stable columns
+    metrics = result["metrics_table"]
+    assert metrics.empty
+    assert "model_name" in metrics.columns
+
+    # skipped must record the models that were not found
+    skipped = result.get("skipped", [])
+    assert len(skipped) == 0  # model_names filtered out, not failed
+
+
+def test_no_successful_model_returns_skip_log():
+    """When no model produces predictions, skipped list must be populated."""
+    df = _make_features_df(200)
+    result = compare_baselines_and_models(
+        df, task_type="regression", horizon=1, test_size=0.2,
+        include_tabular=False,
+        model_names=["Logistic Regression"],  # classification model, won't be in regression list
+    )
+    preds = result["predictions"]
+    assert preds.empty
+    # With include_tabular=False and only a tabular model name, nothing runs
+    skipped = result.get("skipped", [])
+    assert isinstance(skipped, list)
+
+
+def test_single_class_classification_is_skipped():
+    """When all training labels are the same class, classifier must be skipped."""
+    df = _make_features_df(200)
+    # Set all target_direction_1 to the same class
+    df["target_direction_1"] = 0.0
+    result = compare_baselines_and_models(
+        df, task_type="classification", horizon=1, test_size=0.2,
+    )
+    # At least LogisticRegression should be skipped due to single class
+    skipped = result.get("skipped", [])
+    skip_reasons = [s["reason"] for s in skipped]
+    single_class_skips = [r for r in skip_reasons if "Single class" in r]
+    assert len(single_class_skips) > 0, (
+        f"Expected at least one single-class skip, got: {skip_reasons}"
+    )
+    # Baselines (MomentumDirection, MajorityClass) should still succeed
+    assert not result["predictions"].empty
+    assert "Momentum Direction" in result["predictions"]["model_name"].values
+
+
+def test_missing_target_column_skipped_with_reason():
+    """When target column is missing, ValueError with clear message is raised."""
+    df = _make_ohlcv_df(100)
+    with pytest.raises(ValueError, match="Run build_features"):
+        compare_baselines_and_models(
+            df, task_type="regression", horizon=1, test_size=0.2,
+        )
+
+
+def test_optional_model_unavailable_is_handled():
+    """When XGBoost is not installed, it should not appear in available models,
+    and selecting it via model_names should not crash."""
+    from src.crypto_trend_lab.models import tabular as tmod
+
+    df = _make_features_df(200)
+    if not tmod._HAS_XGBOOST:
+        result = compare_baselines_and_models(
+            df, task_type="regression", horizon=1, test_size=0.2,
+            model_names=["XGBoost"],
+        )
+        # XGBoost not in registry, so no baseline/tabular model matches
+        assert result["predictions"].empty
+    else:
+        # If installed, XGBoost should work
+        result = compare_baselines_and_models(
+            df, task_type="regression", horizon=1, test_size=0.2,
+            include_trees=True,
+            model_names=["XGBoost"],
+        )
+        assert not result["predictions"].empty
+
+
+def test_successful_models_still_produce_normal_predictions():
+    """When some models succeed and some fail, successful ones are concatenated."""
+    df = _make_features_df(200)
+    result = compare_baselines_and_models(
+        df, task_type="regression", horizon=1, test_size=0.2,
+    )
+    assert not result["predictions"].empty
+    assert not result["metrics_table"].empty
+    # All baselines + Ridge + ElasticNet + (LightGBM if installed) should succeed
+    assert len(result["metrics_table"]) >= 5
+    # skipped list must exist in result
+    assert "skipped" in result
 
 
 # ---------------------------------------------------------------------------

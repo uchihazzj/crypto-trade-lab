@@ -32,7 +32,7 @@ from src.crypto_trend_lab.models.dataset import (
     get_default_feature_columns,
     get_target_column,
 )
-from src.crypto_trend_lab.models.tabular import _HAS_LIGHTGBM
+from src.crypto_trend_lab.models.tabular import _HAS_CATBOOST, _HAS_LIGHTGBM, _HAS_XGBOOST
 from src.crypto_trend_lab.storage.parquet import (
     load_features_parquet,
     load_ohlcv_parquet,
@@ -794,6 +794,15 @@ with tab_models:
                 help="Run Ridge/Logistic Regression and LightGBM if available.",
             )
 
+        include_trees = st.checkbox(
+            "Include heavier tree ensemble baselines",
+            value=False,
+            help=(
+                "Also run Random Forest, Extra Trees, HistGradientBoosting, "
+                "XGBoost, and CatBoost (if installed). These may be slower."
+            ),
+        )
+
         target_col = get_target_column(task_type, horizon)
         feature_cols = get_default_feature_columns(df_eval)
 
@@ -804,6 +813,16 @@ with tab_models:
 
         if not _HAS_LIGHTGBM:
             st.info("LightGBM is not installed. LightGBM models will be skipped.")
+        if not _HAS_XGBOOST:
+            st.caption("XGBoost is not installed — XGBoost models will be skipped.")
+        if not _HAS_CATBOOST:
+            st.caption("CatBoost is not installed — CatBoost models will be skipped.")
+
+        if include_trees and len(df_eval) > 5000:
+            st.warning(
+                "Running many tree ensemble baselines on a large dataset "
+                "may take time. Consider using a smaller dataset or fewer horizons."
+            )
 
         # --- Run evaluation ---
         if st.button("Run Evaluation", type="primary", width="stretch"):
@@ -815,12 +834,19 @@ with tab_models:
                         horizon=horizon,
                         test_size=test_pct,
                         include_tabular=include_tabular,
+                        include_trees=include_trees,
                     )
                     st.session_state["eval_result"] = result
-                    st.success(
-                        f"Evaluated {len(result['metrics_table'])} models "
-                        f"({len(result['predictions'])} test predictions)"
-                    )
+                    n_models = len(result["metrics_table"])
+                    n_preds = len(result["predictions"])
+                    n_skipped = len(result.get("skipped", []))
+                    msg = f"Evaluated {n_models} models ({n_preds} test predictions)"
+                    if n_skipped:
+                        msg += f" — {n_skipped} skipped"
+                    if n_models == 0:
+                        st.warning(msg)
+                    else:
+                        st.success(msg)
                 except Exception as exc:
                     st.error(f"Evaluation failed: {exc}")
 
@@ -839,14 +865,30 @@ with tab_models:
                 f"Test: {result['test_dates']['start']} → {result['test_dates']['end']}"
             )
 
+            # --- Skipped / failure log ---
+            skipped = result.get("skipped", [])
+            if skipped:
+                st.divider()
+                st.subheader("Skipped Models")
+                skipped_df = pd.DataFrame(skipped)
+                st.dataframe(skipped_df, width="stretch", hide_index=True)
+                st.caption(
+                    "Each skipped model is listed with a reason. "
+                    "Common causes: single-class training data, "
+                    "model fit/predict failure, or model not available."
+                )
+
             st.divider()
             st.subheader("Metrics Comparison")
 
             metrics_df = result["metrics_table"]
-            st.dataframe(
-                metrics_df.set_index("model_name"),
-                width="stretch",
-            )
+            if not metrics_df.empty:
+                st.dataframe(
+                    metrics_df.set_index("model_name"),
+                    width="stretch",
+                )
+            else:
+                st.warning("No models produced metrics for this configuration.")
 
             st.divider()
             st.subheader("Predictions: y_true vs y_pred")
@@ -854,95 +896,101 @@ with tab_models:
             predictions = result["predictions"]
             model_names = predictions["model_name"].unique()
 
-            selected_model = st.selectbox(
-                "Model",
-                model_names,
-                index=0,
-                key="eval_model_select",
-            )
-
-            pred_subset = predictions[predictions["model_name"] == selected_model]
-
-            import plotly.graph_objects as go
-
-            fig = go.Figure()
-
-            if task_type == "regression":
-                fig.add_trace(
-                    go.Scatter(
-                        x=pred_subset["timestamp"],
-                        y=pred_subset["y_true"],
-                        mode="lines+markers",
-                        name="Actual (y_true)",
-                        marker=dict(size=4),
-                    )
-                )
-                fig.add_trace(
-                    go.Scatter(
-                        x=pred_subset["timestamp"],
-                        y=pred_subset["y_pred"],
-                        mode="lines+markers",
-                        name="Predicted (y_pred)",
-                        marker=dict(size=4),
-                    )
+            if len(model_names) == 0:
+                st.warning(
+                    "No models produced predictions for the selected configuration. "
+                    "Check the skipped models list above for reasons."
                 )
             else:
-                # Classification: show probability if available, otherwise class overlay
-                fig.add_trace(
-                    go.Scatter(
-                        x=pred_subset["timestamp"],
-                        y=pred_subset["y_true"],
-                        mode="lines+markers",
-                        name="Actual Direction",
-                        marker=dict(size=4),
-                    )
+                selected_model = st.selectbox(
+                    "Model",
+                    model_names,
+                    index=0,
+                    key="eval_model_select",
                 )
-                fig.add_trace(
-                    go.Scatter(
-                        x=pred_subset["timestamp"],
-                        y=pred_subset["y_pred"],
-                        mode="markers",
-                        name="Predicted Direction",
-                        marker=dict(size=6, symbol="x"),
-                    )
-                )
-                if "y_prob" in pred_subset.columns:
+
+                pred_subset = predictions[predictions["model_name"] == selected_model]
+
+                import plotly.graph_objects as go
+
+                fig = go.Figure()
+
+                if task_type == "regression":
                     fig.add_trace(
                         go.Scatter(
                             x=pred_subset["timestamp"],
-                            y=pred_subset["y_prob"],
-                            mode="lines",
-                            name="Predicted Probability",
-                            line=dict(dash="dot"),
+                            y=pred_subset["y_true"],
+                            mode="lines+markers",
+                            name="Actual (y_true)",
+                            marker=dict(size=4),
                         )
                     )
+                    fig.add_trace(
+                        go.Scatter(
+                            x=pred_subset["timestamp"],
+                            y=pred_subset["y_pred"],
+                            mode="lines+markers",
+                            name="Predicted (y_pred)",
+                            marker=dict(size=4),
+                        )
+                    )
+                else:
+                    # Classification: show probability if available, otherwise class overlay
+                    fig.add_trace(
+                        go.Scatter(
+                            x=pred_subset["timestamp"],
+                            y=pred_subset["y_true"],
+                            mode="lines+markers",
+                            name="Actual Direction",
+                            marker=dict(size=4),
+                        )
+                    )
+                    fig.add_trace(
+                        go.Scatter(
+                            x=pred_subset["timestamp"],
+                            y=pred_subset["y_pred"],
+                            mode="markers",
+                            name="Predicted Direction",
+                            marker=dict(size=6, symbol="x"),
+                        )
+                    )
+                    if "y_prob" in pred_subset.columns:
+                        fig.add_trace(
+                            go.Scatter(
+                                x=pred_subset["timestamp"],
+                                y=pred_subset["y_prob"],
+                                mode="lines",
+                                name="Predicted Probability",
+                                line=dict(dash="dot"),
+                            )
+                        )
 
-            fig.update_layout(
-                title=f"{selected_model} — {target_col}",
-                xaxis_title="Time (UTC)",
-                yaxis_title=target_col,
-                template="plotly_dark",
-                height=450,
-            )
-            st.plotly_chart(fig, width="stretch")
-
-            st.divider()
-            st.subheader("Save Predictions")
-
-            if st.button("Save Predictions to Parquet", width="stretch"):
-                pred_to_save = predictions[predictions["model_name"] == selected_model]
-                path = save_predictions_parquet(
-                    pred_to_save,
-                    exchange=exchange,
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    model_name=selected_model,
-                    target_column=target_col,
+                fig.update_layout(
+                    title=f"{selected_model} — {target_col}",
+                    xaxis_title="Time (UTC)",
+                    yaxis_title=target_col,
+                    template="plotly_dark",
+                    height=450,
                 )
-                st.success(f"Saved {len(pred_to_save)} predictions to {path}")
+                st.plotly_chart(fig, width="stretch")
 
-            with st.expander("Prediction Data Preview"):
-                st.dataframe(predictions.tail(50), width="stretch")
+                st.divider()
+                st.subheader("Save Predictions")
+
+                if st.button("Save Predictions to Parquet", width="stretch"):
+                    pred_to_save = predictions[predictions["model_name"] == selected_model]
+                    path = save_predictions_parquet(
+                        pred_to_save,
+                        exchange=exchange,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        model_name=selected_model,
+                        target_column=target_col,
+                    )
+                    st.success(f"Saved {len(pred_to_save)} predictions to {path}")
+
+                with st.expander("Prediction Data Preview"):
+                    st.dataframe(predictions.tail(50), width="stretch")
 
         # -------------------------------------------------------------------
         # Full Evaluation Report
@@ -988,6 +1036,22 @@ with tab_models:
                     help="Maximum horizon to evaluate. 12 is a reasonable default.",
                 )
 
+        full_include_trees = st.checkbox(
+            "Include heavier tree ensemble baselines",
+            value=False,
+            key="full_trees_checkbox",
+            help=(
+                "Also run Random Forest, Extra Trees, HistGradientBoosting, "
+                "XGBoost, and CatBoost (if installed). These may be slower."
+            ),
+        )
+
+        if full_include_trees and len(df_eval) > 5000:
+            st.warning(
+                "Running many tree ensemble baselines on a large dataset "
+                "may take substantial time."
+            )
+
         if st.button("Run Full Evaluation Report", type="primary", width="stretch"):
             if include_dense:
                 horizons = tuple(range(1, dense_max_h + 1))
@@ -1001,6 +1065,7 @@ with tab_models:
                         task_types=("regression", "classification"),
                         horizons=horizons,
                         test_size=full_test_pct,
+                        include_trees=full_include_trees,
                     )
                     report["summary"]["test_size_pct"] = full_test_pct * 100
                     st.session_state["full_report"] = report
@@ -1188,6 +1253,11 @@ with tab_models:
                         model_names=[detail_model],
                     )
                     detail_preds = detail_result["predictions"]
+                    detail_skipped = detail_result.get("skipped", [])
+
+                    if detail_skipped:
+                        for s in detail_skipped:
+                            st.warning(f"Skipped {s['model_name']}: {s['reason']}")
 
                     if not detail_preds.empty:
                         chart_col1, chart_col2 = st.columns(2)
@@ -1404,15 +1474,38 @@ with tab_models:
                 fc_target = get_target_column(fc_task_type, fc_horizon)
                 avail_models: list[str] = []
                 if fc_task_type == "regression":
-                    avail_models = ["Ridge"]
+                    # Naive baselines
+                    avail_models = ["Zero Return", "Last Return",
+                                    "Moving Average", "Historical Mean Return"]
+                    # Linear models
+                    avail_models.extend(["Ridge", "ElasticNet"])
+                    # Tree ensembles
+                    avail_models.extend([
+                        "Random Forest", "Extra Trees", "HistGradientBoosting",
+                    ])
+                    # External libraries
                     if _HAS_LIGHTGBM:
                         avail_models.append("LightGBM")
-                    avail_models.extend(["Last Return", "Moving Average", "Zero Return"])
+                    if _HAS_XGBOOST:
+                        avail_models.append("XGBoost")
+                    if _HAS_CATBOOST:
+                        avail_models.append("CatBoost")
                 else:
-                    avail_models = ["Logistic Regression"]
+                    # Naive baselines
+                    avail_models = ["Momentum Direction", "Majority Class"]
+                    # Linear models
+                    avail_models.append("Logistic Regression")
+                    # Tree ensembles
+                    avail_models.extend([
+                        "Random Forest", "Extra Trees", "HistGradientBoosting",
+                    ])
+                    # External libraries
                     if _HAS_LIGHTGBM:
                         avail_models.append("LightGBM")
-                    avail_models.extend(["Momentum Direction", "Majority Class"])
+                    if _HAS_XGBOOST:
+                        avail_models.append("XGBoost")
+                    if _HAS_CATBOOST:
+                        avail_models.append("CatBoost")
 
                 fc_model = st.selectbox(
                     "Model",
@@ -1581,9 +1674,23 @@ with tab_models:
             fp_col1, fp_col2, fp_col3 = st.columns(3)
 
             with fp_col1:
+                fp_regression_models = [
+                    "Ridge", "ElasticNet", "Random Forest", "Extra Trees",
+                    "HistGradientBoosting",
+                ]
+                if _HAS_LIGHTGBM:
+                    fp_regression_models.append("LightGBM")
+                if _HAS_XGBOOST:
+                    fp_regression_models.append("XGBoost")
+                if _HAS_CATBOOST:
+                    fp_regression_models.append("CatBoost")
+                fp_regression_models.extend([
+                    "Zero Return", "Last Return", "Moving Average",
+                    "Historical Mean Return",
+                ])
                 fp_model = st.selectbox(
                     "Regression Model",
-                    ["Ridge"] + (["LightGBM"] if _HAS_LIGHTGBM else []),
+                    fp_regression_models,
                     key="fp_model",
                 )
             with fp_col2:
