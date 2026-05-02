@@ -799,7 +799,9 @@ def test_empty_predictions_list_returns_stable_columns():
 
     # skipped must record the models that were not found
     skipped = result.get("skipped", [])
-    assert len(skipped) == 0  # model_names filtered out, not failed
+    assert len(skipped) == 1  # NonExistentModel reported as not found
+    assert skipped[0]["model_name"] == "NonExistentModel"
+    assert "not found" in skipped[0]["reason"]
 
 
 def test_no_successful_model_returns_skip_log():

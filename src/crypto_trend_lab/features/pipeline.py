@@ -24,9 +24,28 @@ def get_technical_feature_columns() -> list[str]:
     return list(TECHNICAL_FEATURE_COLUMNS)
 
 
-def get_target_columns() -> list[str]:
-    """Return the list of prediction target column names."""
-    return list(TARGET_COLUMNS)
+def get_target_columns(df: pd.DataFrame | None = None) -> list[str]:
+    """Return the list of prediction target column names.
+
+    Parameters
+    ----------
+    df : pd.DataFrame or None
+        If provided, also includes any ``target_*`` columns discovered
+        in the DataFrame (e.g. dense direct-horizon targets beyond
+        the standard 1/4/24 horizons).
+
+    Returns
+    -------
+    list[str]
+    """
+    columns = list(TARGET_COLUMNS)
+    if df is not None:
+        extra = sorted(
+            c for c in df.columns
+            if c.startswith("target_") and c not in columns
+        )
+        columns = columns + extra
+    return columns
 
 
 def get_model_input_columns() -> list[str]:

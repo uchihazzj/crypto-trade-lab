@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.crypto_trend_lab.features.technical import (
     TECHNICAL_FEATURE_COLUMNS,

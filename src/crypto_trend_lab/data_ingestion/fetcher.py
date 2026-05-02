@@ -5,7 +5,7 @@ Uses only read-only public endpoints. Private trading APIs are not used.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 import ccxt
@@ -64,6 +64,7 @@ def fetch_ohlcv_range(
     timeframe: str = "1h",
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
+    max_pages: int = 100,
 ) -> pd.DataFrame:
     """Fetch historical OHLCV bars with pagination between *start* and *end*.
 
@@ -82,11 +83,19 @@ def fetch_ohlcv_range(
         Start of the range (inclusive). If None, no lower bound.
     end : datetime, optional
         End of the range (inclusive). If None, fetches up to the present.
+    max_pages : int
+        Maximum number of pages to fetch. Default 100 (~100,000 bars).
+        Prevents infinite loops if the exchange returns stale timestamps.
 
     Returns
     -------
     pd.DataFrame
         Combined OHLCV data with stable schema.
+
+    Raises
+    ------
+    RuntimeError
+        If *max_pages* is exceeded.
     """
     ex = _get_exchange(exchange_id)
     since_ms: Optional[int] = None
@@ -103,6 +112,12 @@ def fetch_ohlcv_range(
 
     while True:
         page_count += 1
+        if page_count > max_pages:
+            raise RuntimeError(
+                f"Exceeded maximum page count ({max_pages}) fetching "
+                f"{exchange_id=} {symbol=} {timeframe=}. "
+                f"The exchange may be returning stale timestamps."
+            )
         raw = ex.fetch_ohlcv(symbol, timeframe=timeframe, since=since_ms, limit=1000)
         if not raw:
             logger.info(f"No more data after {page_count - 1} pages")
@@ -122,7 +137,11 @@ def fetch_ohlcv_range(
         all_frames.append(df)
 
         # Advance pagination cursor past the last bar
-        last_ts = int(df["timestamp"].max().timestamp() * 1000)
+        last_ts_val = df["timestamp"].max()
+        if pd.isna(last_ts_val):
+            logger.warning("Last timestamp is NaT — stopping pagination")
+            break
+        last_ts = int(last_ts_val.timestamp() * 1000)
         since_ms = last_ts + 1
 
         # Stop if fewer than 1000 bars returned (reached end of available data)

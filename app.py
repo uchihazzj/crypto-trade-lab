@@ -15,7 +15,6 @@ import yaml
 from src.crypto_trend_lab.data_ingestion.fetcher import fetch_ohlcv, fetch_ohlcv_range
 from src.crypto_trend_lab.features.pipeline import (
     build_features,
-    get_model_input_columns,
     get_ohlcv_columns,
     get_target_columns,
     get_technical_feature_columns,
@@ -52,9 +51,7 @@ from src.crypto_trend_lab.visualization.charts import (
     candlestick_chart,
 )
 from src.crypto_trend_lab.visualization.display import (
-    DEFAULT_MAX_CANDLES,
     DEFAULT_PREVIEW_ROWS,
-    aggregate_ohlcv_by_count,
     filter_ohlcv_by_chart_range,
     get_display_summary,
     prepare_candlestick_display_data,
@@ -91,19 +88,22 @@ EXCHANGES = list(config["exchanges"].keys())
 TIMEFRAMES = config["timeframes"]
 
 
+_DOWNSTREAM_SESSION_KEYS = (
+    "features_df",
+    "eval_result",
+    "full_report",
+    "forecast_result",
+    "forecast_path_result",
+)
+
+
 def _clear_downstream_state() -> None:
     """Clear state that depends on upstream OHLCV source data.
 
     When fetched/local data changes, previously built features and
     evaluation results are stale and must be invalidated.
     """
-    for key in (
-        "features_df",
-        "eval_result",
-        "full_report",
-        "forecast_result",
-        "forecast_path_result",
-    ):
+    for key in _DOWNSTREAM_SESSION_KEYS:
         st.session_state.pop(key, None)
 
 # ---------------------------------------------------------------------------

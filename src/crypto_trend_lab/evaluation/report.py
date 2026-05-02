@@ -358,6 +358,23 @@ def compare_baselines_and_models(
                 )
             )
 
+    # Report any model_names that matched nothing
+    if model_names:
+        requested = set(model_names)
+        seen = {r["model_name"] for r in results}
+        unseen = requested - seen
+        for name in sorted(unseen):
+            skipped.append({
+                "model_name": name,
+                "task_type": task_type,
+                "horizon": horizon,
+                "target_column": target_column,
+                "reason": (
+                    f"Model {name!r} not found in available "
+                    f"{task_type} models for this configuration."
+                ),
+            })
+
     # Build metrics table
     metrics_table = _build_metrics_table(results, task_type)
 

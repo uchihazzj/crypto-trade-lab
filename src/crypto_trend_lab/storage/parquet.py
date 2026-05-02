@@ -6,7 +6,6 @@ Raw data is never silently overwritten without explicit documentation.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pandas as pd
@@ -17,6 +16,13 @@ from src.crypto_trend_lab.utils.helpers import OHLCV_COLUMNS, symbol_to_safe
 
 BASE_DIR = Path(__file__).resolve().parents[3]  # project root
 DATA_DIR = BASE_DIR / "data"
+
+# Stable column schemas for empty DataFrames returned on missing files.
+_PREDICTIONS_COLUMNS = ["timestamp", "y_true", "y_pred", "model_name", "target_column"]
+_FORECAST_COLUMNS = [
+    "timestamp", "horizon", "target_column", "model_name",
+    "predicted_log_return", "estimated_future_close",
+]
 
 
 def _build_path(
@@ -256,7 +262,7 @@ def load_predictions_parquet(
     path = _build_predictions_path(exchange, symbol, timeframe, model_name, target_column)
     if not path.exists():
         logger.warning(f"File not found: {path}")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=_PREDICTIONS_COLUMNS)
 
     df = pd.read_parquet(path)
     if "timestamp" in df.columns:
@@ -348,7 +354,7 @@ def load_forecast_parquet(
     path = _build_forecast_path(exchange, symbol, timeframe, model_name, target_column)
     if not path.exists():
         logger.warning(f"File not found: {path}")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=_FORECAST_COLUMNS)
 
     df = pd.read_parquet(path)
     if "timestamp" in df.columns:
