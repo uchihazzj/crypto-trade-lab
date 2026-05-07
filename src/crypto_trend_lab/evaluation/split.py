@@ -106,6 +106,8 @@ def walk_forward_split(
         raise ValueError(f"train_size must be >= 1, got {train_size}")
     if test_size < 1:
         raise ValueError(f"test_size must be >= 1, got {test_size}")
+    if step_size < 1:
+        raise ValueError(f"step_size must be >= 1, got {step_size}")
     if train_size + test_size > n:
         raise ValueError(
             f"train_size + test_size = {train_size + test_size} > total rows {n}"

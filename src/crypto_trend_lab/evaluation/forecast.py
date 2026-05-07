@@ -6,6 +6,8 @@ forecast for the most recent observation where the future target is unknown.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 
@@ -48,6 +50,8 @@ from src.crypto_trend_lab.models.tabular import (
 )
 
 # Maps model display names to constructors
+# NOTE: This registry must stay in sync with models/forecast.py:_REGRESSION_MODELS
+# when new regression models are added.
 _REGRESSION_MODELS: dict[str, type] = {
     "Zero Return": ZeroReturnBaseline,
     "Last Return": LastReturnBaseline,
@@ -78,11 +82,15 @@ if _HAS_CATBOOST:
     _REGRESSION_MODELS["CatBoost"] = CatBoostRegressor
     _CLASSIFICATION_MODELS["CatBoost"] = CatBoostClassifier
 
+logger = logging.getLogger(__name__)
+
 
 def _extract_latest_close(df: pd.DataFrame) -> float | None:
-    """Return the latest close price if available."""
+    """Return the latest close price, or None if missing or non-finite."""
     if "close" in df.columns:
-        return float(df["close"].iloc[-1])
+        val = df["close"].iloc[-1]
+        if np.isfinite(val) and val > 0:
+            return float(val)
     return None
 
 
@@ -241,7 +249,11 @@ def forward_forecast(
                         )
     except Exception:
         # Historical context is best-effort; failure should not block forecast
-        pass
+        logger.warning(
+            "Historical context metrics unavailable for %s horizon=%s: could not "
+            "evaluate on chronological hold-out.",
+            model_name, horizon, exc_info=True,
+        )
 
     # --- Train on ALL labeled data ---
     X_train = labeled[feature_columns].to_numpy(dtype=float)
@@ -269,7 +281,7 @@ def forward_forecast(
         result["predicted_log_return"] = predicted_log_return
         result["latest_close"] = latest_close
 
-        if latest_close is not None and latest_close > 0:
+        if latest_close is not None:
             result["estimated_future_close"] = (
                 latest_close * np.exp(predicted_log_return)
             )

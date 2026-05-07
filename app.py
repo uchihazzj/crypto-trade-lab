@@ -1724,7 +1724,7 @@ with tab_models:
 
             if fp_mode == "Dense direct-horizon" and fp_path_len > 48:
                 st.warning(
-                    "Path length {fp_path_len} will train {fp_path_len} "
+                    f"Path length {fp_path_len} will train {fp_path_len} "
                     "independent models. This may take a while. Consider "
                     "reducing the path length for faster results."
                 )

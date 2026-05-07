@@ -196,6 +196,12 @@ def test_walk_forward_split_insufficient_data():
         list(walk_forward_split(df, train_size=15, test_size=10))
 
 
+def test_walk_forward_split_invalid_step_size():
+    df = _make_features_df(100)
+    with pytest.raises(ValueError, match="step_size must be >= 1"):
+        list(walk_forward_split(df, train_size=50, test_size=10, step_size=0))
+
+
 # ---------------------------------------------------------------------------
 # Baseline models
 # ---------------------------------------------------------------------------

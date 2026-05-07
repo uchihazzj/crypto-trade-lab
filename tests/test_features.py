@@ -209,7 +209,7 @@ def test_rolling_vol_uses_only_past_returns():
     # rolling_vol_24 at index 24 depends on indices 1..24 of log_return_1
     # (log_return_1[0] is NaN since close.shift(1) at 0 is NaN)
     # Verify it doesn't depend on index 25+
-    expected = features["log_return_1"].iloc[1:25].std(ddof=0)
+    features["log_return_1"].iloc[1:25].std(ddof=0)
     actual = features["rolling_vol_24"].iloc[24]
     # Use ddof=0 because pandas .std() defaults to ddof=1
     expected_ddof1 = features["log_return_1"].iloc[1:25].std()
@@ -321,6 +321,23 @@ def test_get_technical_feature_columns():
 
 def test_get_target_columns():
     assert get_target_columns() == TARGET_COLUMNS
+
+
+def test_get_target_columns_with_df_discovers_dense_targets():
+    """get_target_columns(df=...) discovers target_* columns beyond 1/4/24."""
+    df = _make_ohlcv_df(30)
+    df["target_return_5"] = 0.01
+    df["target_direction_5"] = 1.0
+    df["target_return_7"] = -0.01
+    df["target_direction_7"] = 0.0
+
+    cols = get_target_columns(df)
+    assert "target_return_1" in cols
+    assert "target_return_5" in cols
+    assert "target_return_7" in cols
+    assert "target_direction_5" in cols
+    # Standard columns come before extra columns
+    assert cols.index("target_return_24") < cols.index("target_return_5")
 
 
 def test_get_model_input_columns_excludes_targets():

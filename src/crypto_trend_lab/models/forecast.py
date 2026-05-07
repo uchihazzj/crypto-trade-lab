@@ -33,7 +33,8 @@ from src.crypto_trend_lab.models.tabular import (
 )
 
 # Regression model name → constructor mapping.
-# Independent of evaluation/forecast.py's registry.
+# NOTE: This registry must stay in sync with evaluation/forecast.py:_REGRESSION_MODELS
+# when new regression models are added.
 _REGRESSION_MODELS: dict[str, type] = {
     "Zero Return": ZeroReturnBaseline,
     "Last Return": LastReturnBaseline,
